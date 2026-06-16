@@ -1,21 +1,24 @@
 # MOS on RISC-V: current porting status
 
-This directory now contains an **early C-based RV64 MOS port skeleton** that already boots on QEMU `virt` via OpenSBI and has completed the first memory-management bring-up step.
+This directory now contains an **early C-based RV64 MOS port skeleton** that boots on QEMU `virt`, enables Sv39 paging, and has a working first-cut trap + timer interrupt path.
 
 ## What has been implemented
 
-This repository now covers two early milestones from [docs/RISC-V 移植.md](docs/RISC-V%20移植.md):
+This repository now covers three early milestones from [docs/RISC-V 移植.md](docs/RISC-V%20移植.md):
 
 1. **kernel boot + character output**
 2. **initial Sv39 memory-management bring-up**
+3. **initial trap entry + timer interrupt handling**
 
 Implemented pieces:
 
 - **Standalone RV64 build system**
   - Added [Makefile](Makefile) for build, run, debug, and objdump generation.
   - Uses `riscv64-linux-gnu-` by default because that toolchain exists in the current environment.
+  - Build flags now explicitly disable PIC/PIE so early trap vectors resolve to direct kernel addresses.
 - **Linker script**
   - Added [kernel.ld](kernel.ld), linking the kernel at `0x80200000` to match the OpenSBI handoff documented in [docs/RISC-V 移植.md](docs/RISC-V%20移植.md).
+  - The linker script now also accounts for `.sdata`, `.sbss`, and aligned BSS end handling so early memory sizing is stable.
 - **Boot entry**
   - Added [kern/arch/boot.S](kern/arch/boot.S).
   - Sets up an early stack.
@@ -24,6 +27,7 @@ Implemented pieces:
 - **Minimal SBI support**
   - Added [kern/arch/sbi.c](kern/arch/sbi.c).
   - Supports legacy console putchar and SBI shutdown.
+  - Now also supports timer programming through the SBI TIME extension, with a fallback to the legacy set-timer call.
 - **Console backend**
   - Added [kern/device/console.c](kern/device/console.c).
   - Hooks kernel character output to SBI.
@@ -42,6 +46,7 @@ Implemented pieces:
     - [include/arch/csr.h](include/arch/csr.h)
     - [include/arch/vm.h](include/arch/vm.h)
     - [include/arch/trap.h](include/arch/trap.h)
+    - [include/arch/sbi.h](include/arch/sbi.h)
 - **Initial physical memory and paging implementation**
   - Added [kern/pmap.c](kern/pmap.c).
   - Implements:
@@ -53,9 +58,19 @@ Implemented pieces:
     - page insertion / lookup / removal helpers
     - kernel root page table setup
     - `satp` write + `sfence.vma`
+- **Initial trap and timer support**
+  - Added [kern/arch/entry.S](kern/arch/entry.S).
+  - Added [kern/arch/trap.c](kern/arch/trap.c).
+  - Implements:
+    - full general-register trap save/restore
+    - CSR save/restore for `sstatus`, `sepc`, `stval`, `scause`
+    - `stvec` installation
+    - `sie.STIE` enable
+    - timer interrupt scheduling through SBI
+    - first C-side interrupt/exception dispatch split
 - **Early kernel main**
   - Updated [kern/init.c](kern/init.c).
-  - Now initializes memory management, runs a self-test, enables paging, prints diagnostics, and then deliberately panics.
+  - Now initializes paging, installs the trap handler, waits for 3 timer interrupts, confirms they arrived, and then deliberately panics.
 
 ## Current memory-management design
 
@@ -97,9 +112,56 @@ This is intentionally conservative. It is enough to:
 - enable Sv39 cleanly
 - keep the kernel alive after the `satp` switch
 
+## Current trap and timer design
+
+This is the first working trap slice, not the final process-aware trap system.
+
+### Trap entry
+
+[kern/arch/entry.S](kern/arch/entry.S) currently:
+
+- allocates a `Trapframe` on the kernel stack
+- saves all 32 general-purpose registers
+- records:
+  - `sstatus`
+  - `sepc`
+  - `stval`
+  - `scause`
+- calls `trap_entry_c(tf)`
+- restores register state and returns with `sret`
+
+This is enough for early kernel-only interrupt bring-up.
+
+### Trap dispatch
+
+[kern/arch/trap.c](kern/arch/trap.c) currently distinguishes:
+
+- **interrupts** vs **exceptions** using the top bit of `scause`
+- supervisor timer interrupts (`scause = interrupt | 5`)
+- placeholder user `ecall` handling
+
+Right now:
+
+- timer interrupts are serviced and re-armed
+- unknown interrupts panic
+- unknown exceptions print the trapframe and panic
+- user syscalls are not implemented yet
+
+### Timer handling
+
+The timer path uses SBI rather than direct machine timer access:
+
+- `trap_init()` installs `stvec`
+- enables `sie.STIE`
+- arms the first timer event with `sbi_set_timer()`
+- enables `sstatus.SIE`
+- each timer interrupt increments `timer_ticks` and arms the next interrupt
+
+This matches the documented RISC-V porting expectation much better than trying to port the MIPS CP0 clock path.
+
 ## What has been verified
 
-The current kernel was rebuilt and booted successfully in QEMU after the Sv39 changes.
+The current kernel was rebuilt and booted successfully in QEMU after the trap/timer changes.
 
 ### Verified build
 
@@ -126,18 +188,27 @@ The kernel now prints:
 - kernel page-table root address
 - `vm self-test passed`
 - `satp enabled, kernel still alive`
+- installed trap-vector address
+- three observed timer interrupts
+- final panic after the interrupt test completes
 
-Then it enters an intentional panic.
+The timer output was explicitly observed as:
+
+- `timer interrupt #1`
+- `timer interrupt #2`
+- `timer interrupt #3`
 
 This confirms that:
 
 - early physical-memory bookkeeping works
 - boot allocator works
-- page metadata allocation works
 - free-list allocator works at least for basic allocation
 - Sv39 page-table walk and leaf insertion work for the current self-test
 - `satp` switching does not immediately kill the kernel
 - `sfence.vma` path is wired in
+- `stvec` points to the intended trap entry
+- supervisor timer interrupts reach S-mode correctly
+- trap save/restore is good enough for repeated timer interrupts and return-to-kernel execution
 
 ## Design changes vs original MOS
 
@@ -150,25 +221,27 @@ This port is not a blind copy of the MIPS tree. Several weak spots are already b
    - This port does not reuse `KSEG0/KSEG1/ULIM/PADDR/KADDR` conventions from the MIPS tree.
    - Physical-to-kernel conversions are explicit and based on the QEMU `virt` DRAM range.
 
-3. **String/memory helpers were adapted for RV64**
+3. **Trap handling no longer depends on MIPS software-managed TLB structure**
+   - The current trap path is built around `stvec`, `scause`, and `sret`, rather than MIPS exception vectors and CP0 cause decoding.
+
+4. **Timer handling now follows SBI expectations**
+   - The MIPS Count/Compare clock path was not ported.
+   - This kernel uses SBI timer calls, which is the correct portability layer for S-mode on OpenSBI.
+
+5. **String/memory helpers were adapted for RV64**
    - The copied MOS string routines were adjusted to use 64-bit words where appropriate instead of keeping 32-bit assumptions unchanged.
 
-4. **Paging bring-up is simpler and less fragile than the original MIPS TLB path**
-   - The current step avoids MIPS software-managed TLB assumptions entirely.
-   - It uses standard Sv39 page tables and `satp`/`sfence.vma`, which is the right foundation for later syscall/process work.
-
-5. **Future CoW support was planned into the bit layout**
+6. **Future CoW support was planned into the bit layout**
    - `PTE_COW` and `PTE_LIBRARY` software bits are defined now so the later fork/IPC work can land without redoing the PTE abstraction.
 
 ## What is still intentionally missing
 
 The following required stages are **still not implemented yet**:
 
-- trap entry / restore path
-- timer interrupt support
+- user/kernel trap-origin policy beyond panic-level diagnostics
 - process/env management
 - scheduler
-- syscalls beyond numbering/header skeletons
+- syscall dispatch and return semantics
 - user-mode entry
 - kernel-side CoW fork
 - IPC
@@ -178,10 +251,11 @@ The following required stages are **still not implemented yet**:
 
 Also note:
 
-- kernel permissions are still coarse because the current root mapping is a 1 GiB RWX leaf for bring-up simplicity
+- kernel permissions are still coarse because the current root mapping is a 1 GiB identity leaf for bring-up simplicity
 - device tree parsing is still omitted
 - there is no high-half kernel yet
-- no trap vector has been installed yet
+- timer interrupts currently prove trap liveness, but are not yet connected to scheduling
+- exceptions still mostly panic rather than applying MOS process-level policy
 
 ## Build and run
 
@@ -216,7 +290,9 @@ Most relevant files in the current slice:
 - [Makefile](Makefile)
 - [kernel.ld](kernel.ld)
 - [kern/arch/boot.S](kern/arch/boot.S)
+- [kern/arch/entry.S](kern/arch/entry.S)
 - [kern/arch/sbi.c](kern/arch/sbi.c)
+- [kern/arch/trap.c](kern/arch/trap.c)
 - [kern/device/console.c](kern/device/console.c)
 - [kern/init.c](kern/init.c)
 - [kern/pmap.c](kern/pmap.c)
@@ -227,14 +303,16 @@ Most relevant files in the current slice:
 - [include/pmap.h](include/pmap.h)
 - [include/arch/vm.h](include/arch/vm.h)
 - [include/arch/csr.h](include/arch/csr.h)
+- [include/arch/trap.h](include/arch/trap.h)
+- [include/arch/sbi.h](include/arch/sbi.h)
 
 ## Next recommended step
 
 The next implementation step should be:
 
-1. install a real trap entry path,
-2. add timer interrupt support,
-3. distinguish user vs kernel trap origin,
-4. then start building `Env` / scheduler / syscall entry on top of the now-working Sv39 base.
+1. teach traps to distinguish kernel-only faults from future user faults more cleanly,
+2. introduce `Env` state and a first scheduler skeleton,
+3. wire timer interrupts into scheduling rather than only counting them,
+4. then add syscall entry and a first U-mode test program.
 
 That is the smallest safe path toward the next mandatory milestone in [docs/RISC-V 移植.md](docs/RISC-V%20移植.md).

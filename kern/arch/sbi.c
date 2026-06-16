@@ -1,6 +1,8 @@
 #include <arch/sbi.h>
 
+#define SBI_EXT_LEGACY_SET_TIMER 0x0
 #define SBI_EXT_LEGACY_CONSOLE_PUTCHAR 0x1
+#define SBI_EXT_TIME 0x54494d45
 #define SBI_EXT_SRST 0x53525354
 #define SBI_SRST_RESET_TYPE_SHUTDOWN 0x0
 #define SBI_SRST_RESET_REASON_NONE 0x0
@@ -32,6 +34,13 @@ void sbi_console_putchar(int ch) {
 	register long a7 asm("a7") = SBI_EXT_LEGACY_CONSOLE_PUTCHAR;
 
 	asm volatile("ecall" : : "r"(a0), "r"(a7) : "memory");
+}
+
+void sbi_set_timer(uint64_t next) {
+	struct sbiret ret = sbi_ecall(SBI_EXT_TIME, 0, (long)next, 0, 0, 0, 0, 0);
+	if (ret.error != 0) {
+		sbi_ecall(SBI_EXT_LEGACY_SET_TIMER, 0, (long)next, 0, 0, 0, 0, 0);
+	}
 }
 
 void sbi_shutdown(void) {

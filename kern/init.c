@@ -1,4 +1,5 @@
 #include <arch/csr.h>
+#include <arch/trap.h>
 #include <pmap.h>
 #include <printk.h>
 
@@ -19,5 +20,13 @@ void kmain(void) {
 
 	vm_enable();
 	printk("  satp enabled, kernel still alive\n");
-	panic("kernel bootstrap complete; next step is trap and timer bring-up");
+
+	trap_init();
+	printk("  trap handler installed at 0x%016lx\n", csr_read_stvec());
+	printk("  waiting for 3 timer interrupts...\n");
+	while (timer_ticks < 3) {
+		wfi();
+	}
+	printk("  observed %lu timer interrupts\n", timer_ticks);
+	panic("kernel bootstrap complete; next step is env and syscall bring-up");
 }

@@ -20,6 +20,8 @@ CFLAGS := \
 	-fno-builtin \
 	-fno-stack-protector \
 	-fno-omit-frame-pointer \
+	-fno-pic \
+	-fno-pie \
 	-Wall -Wextra -Werror -ggdb -O2 \
 	-Iinclude
 
@@ -29,13 +31,14 @@ KERN_SRCS := \
 	kern/init.c \
 	kern/pmap.c \
 	kern/arch/sbi.c \
+	kern/arch/trap.c \
 	kern/device/console.c \
 	kern/printk.c \
 	kern/panic.c \
 	lib/print.c \
 	lib/string.c
 
-KERN_OBJS := $(KERN_SRCS:.c=.o) kern/arch/boot.o
+KERN_OBJS := $(KERN_SRCS:.c=.o) kern/arch/boot.o kern/arch/entry.o
 
 QEMU_FLAGS := -machine virt -m 2G -nographic -bios default -kernel $(KERNEL_ELF)
 

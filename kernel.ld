@@ -26,6 +26,7 @@ SECTIONS
     .data : ALIGN(16) {
         PROVIDE(data_start = .);
         *(.data .data.*)
+        *(.sdata .sdata.*)
         PROVIDE(data_end = .);
     }
 
@@ -33,10 +34,12 @@ SECTIONS
         PROVIDE(bss_start = .);
         *(.bss.stack)
         *(.bss .bss.*)
+        *(.sbss .sbss.*)
+        *(.scommon)
         *(COMMON)
+        . = ALIGN(4096);
         PROVIDE(bss_end = .);
     }
 
-    . = ALIGN(4096);
     PROVIDE(kernel_end = .);
 }
