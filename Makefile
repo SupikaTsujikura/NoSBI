@@ -1,5 +1,5 @@
 ifndef CROSS_COMPILE
-CROSS_COMPILE := riscv64-unknown-elf-
+CROSS_COMPILE := riscv64-linux-gnu-
 endif
 
 CC      := $(CROSS_COMPILE)gcc
@@ -23,7 +23,7 @@ CFLAGS := \
 	-Wall -Wextra -Werror -ggdb -O2 \
 	-Iinclude
 
-LDFLAGS := -T kernel.ld -nostdlib -nostartfiles
+LDFLAGS := -T kernel.ld -nostdlib
 
 KERN_SRCS := \
 	kern/init.c \

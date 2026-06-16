@@ -1,4 +1,4 @@
-#include <arch/riscv.h>
+.equ KERNEL_STACK_SIZE, 0x4000
 
 .section .text.boot
 .global _start
