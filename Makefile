@@ -27,6 +27,7 @@ LDFLAGS := -T kernel.ld -nostdlib
 
 KERN_SRCS := \
 	kern/init.c \
+	kern/pmap.c \
 	kern/arch/sbi.c \
 	kern/device/console.c \
 	kern/printk.c \
