@@ -1,0 +1,1064 @@
+# RISC-V 移植
+
+> 本文档仅供参考，如存在模糊、歧义、错误之处，欢迎向课程组提出反馈。有关 RISC-V 架构的细节，请以官方文档为准：[RISC-V 指令集规范](https://wiki.riscv.org/display/HOME/RISC-V+Technical+Specifications)。 计划参加系统能力竞赛 RISC-V 内核实现赛道的同学也可以参考本文档第一至第四部分，以及可选项的内容。
+>
+> 本文档并非最终版本，可能会有更新。最近一次更新时间为 2026 年 4 月 17 日。
+>
+> 更新日志：
+>
+> 2026 年 4 月 17 日：初始版本。
+
+## 任务说明
+
+该任务需要同学将 MOS 移植到 64 位 RISC-V 平台，并通过 QEMU 仿真运行，你需要完成以下五个部分：
+
+1. **内核启动**：让内核在 QEMU 上启动并输出字符。
+2. **内存管理**：实现物理内存分配和虚拟内存映射。
+3. **异常和中断处理**：处理 RISC-V 的异常和中断。
+4. **进程与调度**：支持用户进程的创建和调度。
+5. **系统调用**：实现指定的系统调用接口, 并能够运行课程组提供的用户程序。
+
+每个部分还提供一些**不计入总分的可选任务**，同学可以根据自己的兴趣和时间选择性地完成。
+
+该任务**最多可由 3 人组队**完成，**不限制实现语言**(课程组推荐 C 或 Rust)，截止时间大约为结课前两周，总计两月时间。
+
+### 任务要求
+
+- 完整可运行的内核代码
+- 内核文档(简要地介绍说明每部分的所实际实现的内容即可)
+- 成功运行课程组提供的用户程序
+- 通过挑战性任务截止日期后的答辩和检查
+
+## RISC-V 架构介绍
+
+### 指令集
+
+RISC-V 是一个开源的精简指令集 (RISC) 架构，与 MIPS 类似，但更模块化。它通过基本指令集（如 `RV64I`）和扩展（如 `M`、`F` 等）支持不同应用场景。本次任务所使用的`qemu-system-riscv64` 的 `virt` 机器默认支持 `rv64imafdch` 指令集，另有 `b`、`v` 等可选扩展。
+
+> `rv64imafdch` 表示 RISC-V 64位架构，包含基本（整数）指令集 `I`，乘法扩展 `M`，原子扩展 `A`，浮点扩展 `F`，双精度浮点扩展 `D`，压缩指令扩展 `C`，虚拟化扩展 `H`。
+
+具体内容可以查阅 [RISC-V ISA manual](https://github.com/riscv/riscv-isa-manual/releases/tag/20240411)。
+
+### 通用寄存器
+
+与 MIPS 类似，RV64I 拥有 32 个通用寄存器，这些寄存器被命名为 `x0`, `x1`, `x2`, ..., `x31`。其中 `x0` 寄存器被硬连接到 0，类似于 MIPS 的 `$zero` 寄存器。
+
+每个寄存器还有一个**ABI 定义的名称**，用于更好地描述其用途，命名对应如下：
+
+- `x0`：`zero`, 始终为0
+- `x1`：`ra`, 返回地址
+- `x2`：`sp`, 栈指针
+- `x3`：`gp`, 全局指针
+- `x4`：`tp`, 线程指针
+- `x5-x7`：`t0-t2`, 临时寄存器
+- `x8`：`s0/fp`, 保存的寄存器，也可用作栈帧指针
+- `x9`：`s1`, 保存的寄存器
+- `x10-x17`：`a0-a7`, 参数寄存器, 其中 `a0-a1` 还用于返回值
+- `x18-x27`：`s2-s11`, 保存的寄存器
+- `x28-x31`：`t3-t6`, 临时寄存器
+
+这些寄存器的具体用途和调用约定详见 [RISC-V 调用约定](https://riscv.org/wp-content/uploads/2024/12/riscv-calling.pdf)。
+
+### 特权架构
+
+MIPS 采用了内核态/用户态两级特权架构。与之相比，RISC-V 提供了更为精细的权限控制。RISC-V 主要定义了三种标准特权模式：
+
+1. **机器模式 (Machine Mode, M-Mode)**：这是最高的权限级别，拥有对所有硬件资源的完全访问权限。M-Mode 通常用于运行引导代码、固件，处理中断、异常等。
+2. **监督者模式 (Supervisor Mode, S-Mode)**：这是次高级别的特权模式，主要用于运行操作系统内核。S-mode 亦拥有管理内存、中断等硬件资源的能力，但权限低于 M-mode。本次任务要求移植的内核就是运行在 S-Mode 下。
+3. **用户模式 (User Mode, U-Mode)**：这是最低的权限级别，通常用于运行用户应用程序。U-Mode 下的程序只能访问操作系统分配给它的资源，无法直接访问硬件资源。
+
+除上述三种标准特权模式外，RISC-V 还提供了一些可选的特权模式，如 H 扩展引入了虚拟机监督者模式 (Hypervisor Mode, H-Mode)，用于支持虚拟机和更复杂的系统级虚拟化功能。
+
+注：下文将 M-Mode 称为M态，S-Mode 称为S态，U-Mode 称为U态。
+
+![img](https://os.buaa.edu.cn/tutorial-embedded/2026%E6%98%A5-%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/%E6%8C%91%E6%88%98%E6%80%A7%E4%BB%BB%E5%8A%A1/assets/riscv_porting_2025/privileged-architecture.png)
+
+### 控制与状态寄存器
+
+与 MIPS 中的 CP0 协处理器寄存器类似，RISC-V 也提供了用于控制和配置处理器行为、以及获取处理器状态的特殊寄存器，称为控制与状态寄存器 (Control and Status Registers, CSRs)。 CSRs 是特权级别指令集的一部分，**每个**特权级都有**属于自己级别**的 CSR 集合，访问高于当前特权级别的 CSR 会触发异常。这些寄存器允许操作系统和其他特权软件执行如配置中断处理、设置虚拟内存映射、监视和控制硬件执行状态等任务。下面列举了S态中一些重要的控制寄存器：
+
+1. 杂项
+
+   - `sstatus` (Supervisor Status)：这是S态最核心的 CSR 之一，包含了全局中断使能位 `SIE`、控制S态访问U态资源能力的 `SUM` 位和其他用于控制或指示机器模式执行环境的状态位。
+
+2. 内存管理相关
+
+   - `satp` (Supervisor Address Translation and Protection)：控制虚拟地址到物理地址到翻译的寄存器，存放页表基地址和页表配置信息。
+
+3. 异常和中断处理相关
+
+   - `stvec` (Supervisor Trap Vector)：保存了S态异常处理入口地址，当发生异常时，处理器会跳转到这个地址执行异常处理程序。
+   - `scause` (Supervisor Cause): 异常原因寄存器，用于存放异常的原因。
+   - `sepc` (Supervisor Exception Program Counter): 异常程序计数器，用于存放异常发生时的程序计数器。
+
+4. 中断相关
+
+   - `sie` (Supervisor Interrupt Enable) 和 `sip` (Supervisor Interrupt Pending)：这两个 CSR 分别控制中断使能和中断挂起，用于中断管理。
+
+   - `time`：时钟计数器，记录了处理器运行时间，你需要根据 `time` 的值设置时钟中断。
+
+     注：这个寄存器在U态也可以访问。
+
+为了完成本任务，你*至少*需要在合适的时机正确地配置和使用上面列出的控制与状态寄存器。其他控制与状态寄存器也可能在你的内核中发挥重要作用。
+
+需要使用 `csrw`,`csrr`,`csrrw` 等特权指令来访问这些控制寄存器，示例如下：
+
+```
+# 将 satp 寄存器的值保存到 t0 寄存器
+csrr t0, satp
+# 将 t0 寄存器的值写入 satp 寄存器
+csrw satp, t0
+# 交换 t0 寄存器和 satp 寄存器`的值
+csrrw t0, satp, t0
+```
+
+除了上述寄存器，RISC-V还定义了其他多种控制与状态寄存器，用于不同的监控、管理和优化任务。这些寄存器的具体集合和功能可能根据具体的RISC-V实现和所支持的特权级别不同。通过这些寄存器，操作系统能够实现对硬件的精细控制，优化性能，保证系统安全性和稳定性。
+
+S态控制与状态寄存器的文档集中在 [RISC-V 特权指令集文档](https://github.com/riscv/riscv-isa-manual/releases/download/20240411/priv-isa-asciidoc.pdf) 的第 10.1 节。
+
+### 监督者二进制接口 (Supervisor Binary Interface, SBI)
+
+为了支持S态应用程序（操作系统内核等）在不同的硬件平台上运行，RISC-V 定义了 SBI 标准。SBI 是一组标准的函数调用接口，用于操作系统内核与硬件平台之间的通信。通过这些接口，操作系统内核可以请求硬件执行一些特定的操作，如获取硬件基本信息、打印字符、设置中断处理程序等，而无需关心具体的硬件实现细节。
+
+提供 SBI 接口的程序叫做**监督者运行环境(Supervisor Execution Environment, SEE)** 或 **SBI 实现**，一般运行在M态。本次任务所使用的 `qemu-system-riscv64` 内置了 `OpenSBI`，它是一个开源的 SBI 实现。
+
+SBI 接口的具体内容可以查阅 [RISC-V SBI 规范](https://github.com/riscv-non-isa/riscv-sbi-doc/releases/download/vv3.0-rc1/riscv-sbi.pdf)。
+
+### RISC-V文档
+
+- [RISC-V 非特权指令集文档](https://github.com/riscv/riscv-isa-manual/releases/download/20240411/unpriv-isa-asciidoc.pdf)
+- [RISC-V 特权指令集文档](https://github.com/riscv/riscv-isa-manual/releases/download/20240411/priv-isa-asciidoc.pdf)
+- [RISC-V 调用约定](https://riscv.org/wp-content/uploads/2024/12/riscv-calling.pdf)
+- [RISC-V SBI 规范](https://github.com/riscv-non-isa/riscv-sbi-doc/releases/download/vv3.0-rc1/riscv-sbi.pdf)
+
+## 内核启动
+
+### 前述
+
+该部分需要你实现以下内容:
+
+1. 组织基础内核文件结构，编写脚本提供编译与运行方式
+2. 编写链接脚本，将内核代码链接到正确的地址
+3. 编写启动代码，实现内核的启动
+4. 实现控制台字符输出
+
+### 内核文件结构
+
+这里提供基础的文件结构供参考:
+
+```
+.
+├── Makefile
+├── kernel
+│   ├── init.c
+│   └── start.S
+└── kernel.ld
+```
+
+- `Makefile`:用于提供编译与运行方式
+- `kernel`: 内核代码目录
+- `init.c`: 内核初始化代码
+- `start.S`: 内核启动代码
+- `kernel.ld`: 链接脚本
+
+### 环境配置
+
+推荐 Windows 用户在 WSL 上进行开发，其他用户也请选择合适的方式。
+
+下面是一些你会用到的工具：
+
+- `qemu-system-riscv64`
+- `riscv64-unknown-elf-gcc` 和 `riscv64-unknown-elf-binutils`，或
+- `clang` 和 `llvm` 工具链
+- `gdb-multiarch` 或 `lldb`
+
+### 编译、链接和运行选项
+
+在完成环境的搭建后，我们正式开始内核开发。你需要提供合理的编译选项，使得内核代码能在裸机环境下运行。以下是供参考的编译和链接选项：
+
+```
+CFLAGS += -march=rv64imafdch -mcmodel=medany \
+          -nostdlib -nostartfiles -Wall      \
+          -Wextra -Werror -ffreestanding     \
+          -fno-builtin -fno-stack-protector
+
+LDFLAGS += -T kernel.ld -nostdlib -nostartfiles
+```
+
+在任务中我们使用 `qemu-system-riscv64` 来运行内核。以下是供参考的 QEMU 启动参数：
+
+```
+qemu-system-riscv64          \
+    -machine virt            \
+    -m 2G                    \
+    -nographic               \
+    -kernel <kernel_file>    
+# -machine 指定机器种类，-m 设置内存大小，-nographic 不使用图形界面，-kernel 指定内核程序
+
+# 此外，
+# -s -S 启用 GDB 调试
+# -bios <OpenSBI> 可以指定自定义的 OpenSBI 程序
+# -cpu 可以启用更多 CPU 扩展，如 v 向量扩展等
+# -smp <num> 可以指定 CPU 核心数
+```
+
+### 编写内核链接脚本
+
+链接脚本告诉链接器如何将目标文件链接到可执行文件。具体而言，链接脚本需要指定可执行文件的入口函数，以及所需处理段的地址等。
+
+链接脚本的详细内容可以参考[LD文档](https://ftp.gnu.org/old-gnu/Manuals/ld-2.9.1/html_chapter/ld_3.html)，这里给出简单的示例和介绍:
+
+```
+# 指定架构为riscv 
+OUTPUT_ARCH(riscv)
+
+# 指定入口函数为_start
+ENTRY(_start)
+
+# 定义变量
+# 基地址设置为 0x80200000，因为OpenSBI默认跳转到这个地址
+BASE_ADDR = 0x80200000
+KERNEL_END_ADDR = 0x80400000;
+# 定义段
+SECTIONS {
+    . = BASE_ADDR; # 将当前地址设为BASE_ADDR
+    # 将大括号内段放入text段
+    .text : {
+        # PROVIDE表示如果未定义stext，则设置stext为当前地址
+        PROVIDE(stext = .);
+        *(.text.boot)
+        *(.text)
+        PROVIDE(etext = .);
+    }
+    . = ALIGN(4K); # 将下一个地址设为4K对齐
+    .data : {
+        PROVIDE(sdata = .);
+        *(.data .data.*)
+        PROVIDE(edata = .);
+    }
+    . = ALIGN(4K);
+    .bss : {
+        # 内核栈位置
+        .bss.stack = .;
+        # 实际的bss段从内核栈之后开始
+        PROVIDE(sbss = .);
+        *(.bss .bss.*)
+        PROVIDE(ebss = .);
+    }
+    . = KERNEL_END_ADDR;
+}
+```
+
+### 编写入口函数
+
+在链接脚本中，我们指定了入口函数为 `_start`，OpenSBI 完成必要的初始化后，会跳转到这个地址。我们需要通过汇编代码编写内核的入口函数，为进入 C 或 Rust 代码做好准备。由于 OpenSBI 已经为你初始化了 BSS 段和重要的 CSR，你只需要**为内核设置栈指针**，再跳转到内核的主函数中。
+
+```
+.section .bss.stack
+.global KERNEL_STACK
+KERNEL_STACK:
+    .skip 1 << 12 # 预留 4KiB 内核栈空间
+
+.section .text.boot
+.global _start
+_start:
+    # 设置栈指针
+    la t0, KERNEL_STACK
+    li t1, 1
+    slli t1, t1, 12
+    add sp, t0, t1
+    # 跳转到内核主函数
+    call main
+```
+
+需要注意的是，OpenSBI 在启动时会将**当前的 hartid** (HARdware Thread ID, 即 CPU 核心 ID) 和**设备树地址**分别存放在 `a0` 和 `a1` 寄存器中传递给内核，你可以视需要使用这两个值。
+
+### 字符输出
+
+借助 SBI 的 legacy 扩展 `sbi_console_putchar` 或 `dbcn` 扩展（在 SBI v2.0 中引入，旧版本 QEMU 中内置的 OpenSBI 可能不支持）中的 `sbi_debug_console_write` 函数，可以很轻易地实现字符输出。
+
+这里给出一个包装好的 `putchar` 函数实例：
+
+```
+int64_t putchar(char ch) {
+    register uint64_t a0 asm("a0") = ch;  // 字符
+    register uint64_t a7 asm("a7") = 0x1; // SBI_CONSOLE_PUTCHAR
+    asm volatile("ecall"                  // 发起SBI调用
+                 : "+r"(a0)
+                 : "r"(a7)
+                 : "memory");
+    return (int64_t)a0;                   // 返回 0 表示成功，负值表示失败
+}
+
+// 假设这是内核的主函数
+__attribute__((noreturn)) void main(uint64_t hartid, uint64_t dtb_addr) {
+    putchar('H');
+    putchar('e');
+    putchar('l');
+    putchar('l');
+    putchar('o');
+    putchar(',');
+    putchar(' ');
+    putchar('R');
+    putchar('I');
+    putchar('S');
+    putchar('C');
+    putchar('-');
+    putchar('V');
+    putchar('!');
+    putchar('\n');
+    while (1)
+        ;
+}
+```
+
+成功实现字符输出后，你可以参考 MOS 中的 `vfmtprint` 和 `printk` 函数实现更为复杂的格式化输出。
+
+你只需要实现基于 SBI 的字符输出即可；下文“可选项”一节还描述了编写 NS16550A 串口设备驱动实现字符输出的方式。
+
+### 启动！
+
+完成上述步骤后，你就可以通过 QEMU 运行内核了。如果一切顺利，你应该能看到 OpenSBI 的输出，然后是你的内核输出：
+
+```
+OpenSBI v1.5-20-g6a090ee
+# 省略部分 OpenSBI 输出...
+Boot HART MEDELEG         : 0x0000000000f0b509
+Hello, RISC-V!
+```
+
+## 内存管理
+
+### 前述
+
+该部分需要你实现以下内容:
+
+1. 实现物理内存管理与分配
+2. 实现基于 Sv39 分页机制的虚拟内存管理
+
+### 物理内存管理
+
+你需要将物理内存划分为 4KiB 大小、页对齐的单元，并实现一种物理内存分配方式。
+
+以下是可参考的实现方式：
+
+1. 单链表分配: MOS 采取的方式，仅支持单页分配
+2. 伙伴系统: 采用伙伴系统实现内存分配，支持多页及不同对齐方式分配
+3. 伙伴系统 + SLAB 分配器: 在伙伴系统的基础上实现 SLAB 分配器，支持小块内存分配
+
+课程组对实现方式没有要求，你可以参考或使用其他开源项目的实现。
+
+你可以通过硬编码的方式将物理内存的起始地址和大小传递给内核：开始地址为 `0x8000_0000`，大小则为启动时所指定的大小；如果你实现了设备树支持，你可以从设备树中获取这些信息。
+
+### 虚拟内存管理
+
+#### RISC-V分页机制
+
+RISC-V 同样使用多级页表管理虚拟内存。对于 64 位 RISC-V，存在 `Sv39`、`Sv48`、`Sv57` 等分页模式，这些分页模式的区别仅仅在于页表的级数和支持的虚拟地址空间大小。`Sv39` 分页模式采用 3 级页表，支持 512 GiB 虚拟地址空间，足以满足本次任务(以及目前市面上*任何* RISC-V 设备)的需求。
+
+Sv39 分页模式的虚拟地址结构如下： ![Sv39 Virtual Address](https://os.buaa.edu.cn/tutorial-embedded/2026%E6%98%A5-%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/%E6%8C%91%E6%88%98%E6%80%A7%E4%BB%BB%E5%8A%A1/assets/riscv_porting_2025/sv39-va.png)
+
+#### 页表和页表项
+
+RISC-V 中，每个页表占据一个物理页 (4KiB)，其中包含 512 个页表项，每个页表项占据 8 字节。
+
+Sv39 分页模式的页表项结构如图： ![Sv39 Page Table Entry](https://os.buaa.edu.cn/tutorial-embedded/2026%E6%98%A5-%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/%E6%8C%91%E6%88%98%E6%80%A7%E4%BB%BB%E5%8A%A1/assets/riscv_porting_2025/sv39-pte.png)
+
+- `V`：有效位，`1` 表示有效。无效的页表项会被 MMU 忽略。
+
+- `X`, `W`, `R`：读、写、执行权限位, 它们的组合决定了对应页的访问权限，如表：
+
+  | X    | W    | R    | 权限           |
+  | :--- | :--- | :--- | :------------- |
+  | 0    | 0    | 0    | 非叶页表项     |
+  | 0    | 0    | 1    | 只读           |
+  | 0    | 1    | 0    | 保留           |
+  | 0    | 1    | 1    | 可读可写       |
+  | 1    | 0    | 0    | 仅执行         |
+  | 1    | 0    | 1    | 可读可执行     |
+  | 1    | 1    | 0    | 保留           |
+  | 1    | 1    | 1    | 可读可写可执行 |
+
+  请注意，XWR 位为 `0b000` 时，对应的页表项为非叶页表项，此时**不应当**设置`D`、`A`、`U`标志位，否则会导致异常。
+
+  > **叶页表项** 是指向物理页的页表项，而 **非叶页表项** 是指向下一级页表的页表项。若不考虑巨页机制，可以简单地认为0级页表项为非叶页表项，1级和2级页表项为叶页表项。
+  >
+  > 请参考下文“可选项”一节对巨页的介绍。
+
+- `U`：用户权限位，若置 `1`，则U态程序可访问。
+
+  > 默认情况下，S态程序不能访问标记为U的页。如果 `sstatus` 寄存器中的 `SUM` 位设置为`1`，S态程序可以访问标记为U的页。
+
+- `G`：全局位，若置 `1`，则该页表项在任何 ASID 下都有效。
+
+- `A`：访问位，硬件会在访问时将其置 `1`。内核可以定期清除并检查此位，用于页面置换算法。
+
+- `D`：脏位，硬件会在写入时将其置 `1`。
+
+- `RSW`：保留给软件使用的位，可以用于存储额外的信息，如 CoW 标记等。
+
+- `10-53`：物理页号。
+
+- `54-63`位应当设置为 `0`。
+
+#### 设置分页模式
+
+在 RISC-V 中，分页模式和根页表的基地址保存在 `satp` 寄存器中，虚拟地址向物理地址的翻译在设置了 `satp` 后由硬件自动进行。`satp` 的字段划分如下：
+
+- MODE 占 4 位 (bit 63-60)
+- ASID 占 16 位 (bit 59-44)
+- PPN 占 44 位 (bit 43-0 )
+
+如下图：
+
+![Satp Register](https://os.buaa.edu.cn/tutorial-embedded/2026%E6%98%A5-%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/%E6%8C%91%E6%88%98%E6%80%A7%E4%BB%BB%E5%8A%A1/assets/riscv_porting_2025/satp.png)
+
+- `ASID`: 标识不同地址空间
+
+- `PPN`: 根页表所在的物理页号。
+
+- `MODE`: 使用的地址映射方案，在 RV64 中如下表：
+
+  | 取值  | 名称     | 描述                       |
+  | :---- | :------- | :------------------------- |
+  | 0     | Bare     | 无页表，物理地址即虚拟地址 |
+  | 1-7   | -        | 保留值                     |
+  | 8     | **Sv39** | Sv39分页                   |
+  | 9     | Sv48     | Sv48分页                   |
+  | 10    | Sv57     | Sv57分页                   |
+  | 11    | Sv64     | 保留，未来作为Sv64分页使用 |
+  | 12-13 | -        | 保留值                     |
+  | 14-15 | -        | 用户自定义                 |
+
+#### 具体实现
+
+**1. 实现内存管理**
+
+你需要实现页表机制，通过包括但不限于以下接口实现内存管理：
+
+- `map`: 将虚拟地址按照指定的权限映射到物理地址
+- `unmap`: 取消虚拟地址的映射
+- `translate`: 将虚拟地址转换为物理地址
+- `walk`: 遍历页表，查找虚拟地址对应的页表项
+
+**2. 映射内核**
+
+在启用分页之前，你需要创建内核页表，将内核的虚拟地址映射到物理地址。你可以通过内核链接脚本中定义的符号来获取内核的地址段，然后通过上述的 `map` 函数将内核的虚拟地址映射到物理地址。
+
+你可以选择将内核虚拟地址直接映射到相同的物理地址，这样不需要额外操作即可使内核正常运行。 另一种方式是通过映射将内核移动至其他内存区域，你可以参考下文“可选项”一节中的描述。
+
+**3. 启用分页**
+
+要启用分页，你需要设置 `satp` 寄存器，将分页模式和根页表的基地址写入其中。你可以通过 `csrw` 指令来设置 `satp` 寄存器。
+
+请注意，写入 `satp` 时，已有的TLB缓存不会自动失效，你需要使用 `sfence.vma` 指令手动刷新 TLB。
+
+```
+la t0, page_table  # 页表基地址（4KiB对齐）
+srli t0, t0, 12    # 转换为物理页号
+li t1, 8 << 60     # Sv39分页模式
+or t0, t0, t1      
+csrw satp, t0      # 设置satp寄存器
+sfence.vma         # 刷新TLB
+```
+
+请参考 [RISC-V 特权指令集文档](https://github.com/riscv/riscv-isa-manual/releases/download/20240411/priv-isa-asciidoc.pdf) 10.1.11 节。
+
+## 异常和中断处理
+
+### 前述
+
+该部分需要你实现以下内容:
+
+1. 设置异常处理入口
+2. 实现异常和中断处理
+
+### 异常处理
+
+> 注: RISC-V所有的异常和中断其实都默认由M态处理，但是通过CSR `medeleg` 和 `mideleg` 可以将异常和中断委托S态处理，OpenSBI自动设置了这两个寄存器。
+
+RISC-V 架构使用统一的**陷阱 (Trap)** 机制来处理**异常 (Exceptions)** 和**中断 (Interrupts)**。 陷阱是指程序执行流的意外或外部触发的转移，用于处理错误情况或外部事件。
+
+- **异常**是同步的，是由**指令执行**过程中的错误或特殊情况引起的，如除零、读写未映射的地址、环境调用 (`ecall`) 等。
+- **中断**是异步的，是由外部设备或计时器等**硬件或软件**触发的，与当前执行的指令无关，如时钟中断、串口中断、软件中断(核间中断)等。
+
+发生陷阱时，硬件会自动将特权级别提升到至少能够处理该陷阱的级别。M态可以处理所有特权级的陷阱；M态设置委托后，S态可以处理U态和自身的陷阱；U态不能处理陷阱，当U态发生陷阱时，会陷入更高的特权级。
+
+RISC-V的S态陷阱处理入口和处理模式通过 CSR `stvec` 设置：
+
+![stvec](https://os.buaa.edu.cn/tutorial-embedded/2026%E6%98%A5-%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/%E6%8C%91%E6%88%98%E6%80%A7%E4%BB%BB%E5%8A%A1/assets/riscv_porting_2025/stvec.png)
+
+- `stvec` 的低2位用于指示异常处理的模式，`0b00` 表示直接跳转，`0b01` 表示启用中断向量化。请参考“可选项”一节中对中断向量化的描述。
+- `stvec` 的高位用于保存异常处理入口地址，当发生异常时，处理器会跳转到这个地址执行异常处理程序。该地址必须按4字节对齐。
+
+发生陷阱时，硬件将处理所需的信息保存在 CSR 中，如触发陷阱的指令地址、陷阱原因等。下面列出了部分存放异常和中断处理相关信息的 CSR：
+
+- `scause` 保存陷阱原因。最高位为1表示中断，为0表示异常。低位编码异常或中断的具体类型。
+
+  具体编码请参考 [RISC-V 特权指令集文档](https://github.com/riscv/riscv-isa-manual/releases/download/20240411/priv-isa-asciidoc.pdf) 10.1.8 节 Supervisor Cause Register (`scause`)。
+
+- `sepc` 保存触发异常的指令地址。
+
+- `stval` 保存导致异常的指令或访存地址。
+
+下面描述了S态陷阱处理的基本流程：
+
+1. **陷阱发生**: 异常或中断发生。
+2. 硬件处理
+   - 将特权级别提升到相应的处理级别（S态）
+   - 保存陷阱原因、受害 `pc` 等信息到相应的 CSR 中
+   - 在 `sstatus` 中禁用中断
+   - 跳转到 `stvec` 指定的处理入口
+3. **保存上下文**：陷阱处理程序将通用寄存器、 CSR 等上下文保存到栈中。
+4. **处理陷阱**：根据陷阱原因，执行相应的处理逻辑。
+5. **恢复上下文**：将保存的上下文恢复到寄存器中。
+6. **返回**：执行 `sret` 指令，返回到触发陷阱的指令恢复执行，特权级此时也一并恢复。
+
+#### 具体实现
+
+你需要实现异常处理函数，并将其设置为 `stvec` 指定的地址，处理函数需要根据上下文中的`sepc`、`scause` 等信息，判断不同类型的异常（或中断），并进行相应的处理。你可能需要详细实现系统调用和访存异常的处理逻辑，其他异常可以简单地触发panic。
+
+### 中断处理
+
+`sstatus` CSR 中的 `SIE` 位是全局中断使能位，当 `SIE` 为 `1` 时，S态可以响应中断。`SPIE` 位保存了中断使能位的上一个状态。当发生**陷阱**时，硬件会自动将 `SPIE` 位设置为 `SIE` 的值，并将 `SIE` 位清零，以禁用中断。当陷阱处理完成(执行 `sret` 指令)后，硬件会将 `SIE` 位恢复为 `SPIE` 的值，并将 `SPIE` 位置 `1` 。
+
+![sstatus](https://os.buaa.edu.cn/tutorial-embedded/2026%E6%98%A5-%E6%93%8D%E4%BD%9C%E7%B3%BB%E7%BB%9F/%E6%8C%91%E6%88%98%E6%80%A7%E4%BB%BB%E5%8A%A1/assets/riscv_porting_2025/sstatus.png)
+
+`sie` 和 `sip` 寄存器分别保存了中断使能位和中断挂起位。对于每个中断，只有 `sie` 中断号对应的位为 `1`，中断才会被响应。`sip` 寄存器保存了当前挂起的中断，当中断发生时，硬件会将对应的位设置为 `1`。`sip` 中有的位是只读的，在处理前后由硬件自动设置和清除。有的位是可写的，如 `SSIP` 位，需要软件处理后手动清除。 请参考 [RISC-V 特权指令集文档](https://github.com/riscv/riscv-isa-manual/releases/download/20240411/priv-isa-asciidoc.pdf) 10.1.3 节 Supervisor Interrupt Registers (`sip` and `sie`)。
+
+> M态的 CSR `mtime` 和 `mtimecmp` 可以用于实现时钟中断，`mtime` 寄存器会以固定频率递增，并且会在发生溢出时回绕（尽管在64位设备上这不太可能发生），当其大于或等于 `mtimecmp` 时，就会由 `CLINT` 产生时钟中断。
+
+对于S态程序来说，通过 `time` (不是 `mtime`) CSR 可以获取当前时钟。SBI 的 `Timer` 扩展提供了设置时钟中断的接口。
+
+也可以通过 `stimecmp` CSR 设置S态时钟中断，请参考下文“可选项”一节中对S态时钟中断的描述。
+
+#### 具体实现
+
+你只需要实现时钟中断的触发和处理即可。
+
+### 系统调用
+
+在 RISC-V 中，U态的系统调用对应 8 号异常。当U态程序执行 `ecall` 指令时，会触发异常，硬件会将特权级别提升到S态，并跳转到 `stvec` 指定的地址执行异常处理程序。在异常处理程序中，你需要根据 `scause` 寄存器的值判断是系统调用，通过上下文获取系统调用号和参数，执行相应的系统调用处理函数，最后返回到用户态继续执行。
+
+## 进程与调度
+
+### 前述
+
+你需要实现以下内容:
+
+1. 实现ELF文件的加载与解析
+2. 创建进程控制块 (PCB) 结构
+3. 实现进程调度算法
+4. 利用时钟中断实现进程切换
+
+### 进程加载
+
+ELF 是一种常见的二进制文件格式，用于编码可执行文件、目标文件、共享库等。在本次任务中，你需要实现对 ELF 文件的解析，将 ELF 文件加载到内存中，获取其入口地址，同时，你需要读取程序头表，将程序头表中的内容加载到内存中。在加载过程中，你需要注意对齐、权限等问题。你需要预先为用户程序分配栈空间，将用户程序上下文的栈指针指向栈顶。
+
+课程组提供的用户程序是静态链接的，保证各个程序段按页对齐，你可以直接将程序按原样加载到内存中。保证用户程序运行时访问的地址在 `0x0000_0000-0x4000_0000` 范围内。
+
+实现方式可参考MOS或是其他开源实现。
+
+### 进程控制块
+
+实现进程控制块 (PCB) 结构，PCB 结构应该包含进程的基本信息，如进程 ID 、进程状态、保存的上下文等。你可以参考 MOS 中的 PCB 结构（即 `Env` 结构体），也可以根据自己的设计实现 PCB 结构。
+
+### 进程调度算法
+
+MOS 采用时间片轮转调度算法实现进程调度，设置单一调度队列。每个进程分配一定数量的时间片，每次运行消耗一个时间片。本任务对调度算法没有具体要求，鼓励尝试其他调度算法。
+
+### 进程切换
+
+时钟中断（或 `SYS_yield` 系统调用等情况）发生时，内核大致通过以下步骤实现进程切换：
+
+1. 保存当前进程的上下文
+2. 根据调度算法选择下一个进程
+3. 恢复下一个进程的上下文
+4. 切换页表或 ASID
+5. 设置下一个时钟中断
+6. 返回到用户态执行新进程
+
+请注意，当页表切换时，TLB 里现有的项不会立即失效，你需要使用 `sfence.vma` 指令来刷新 TLB ，或者使用 ASID 来隔离不同进程的地址空间。
+
+## 系统调用
+
+### 前述
+
+你需要实现一系列系统调用，以便用户程序能够访问内核提供的服务。在本次任务中，你需要实现下面所描述的系统调用，以支持课程组提供的用户程序运行。
+
+### ABI
+
+> In computer software, an application binary interface (ABI) is an interface between two binary program modules. Often, one of these modules is a library or operating system facility, and the other is a program that is being run by a user.
+
+你需要根据如下调用约定实现系统调用接口： - **系统调用号**在 `a7` 寄存器中传递。 - **参数**通过 `a0-a6` 寄存器传递，未使用的寄存器可以为任意值。 - **返回值**通过 `a0` 寄存器传递。 - 在调用前后，除了 `a0` 寄存器，其他寄存器的值不应该被修改。
+
+举例来说，对于 `0` 号系统调用 `SYS_putchar`，用户程序会通过如下方式调用你实现的接口：
+
+```
+li a7, SYS_putchar # 系统调用号
+li a0, 'A'         # 参数
+ecall              # 触发系统调用
+```
+
+
+
+### 错误码
+
+系统调用应规定错误码，以便用户程序能够获取系统调用的执行结果。若返回值为负数，表示系统调用执行失败，用户程序可以通过错误码获取失败原因。本任务采用与MOS相同的错误码定义：
+
+```
+#define E_SUCCESS 0       // 调用成功
+#define E_UNSPECIFIED 1   // 未知或未指定的错误
+#define E_BAD_ENV 2       // 请求的进程不存在，或者不能执行请求的操作
+#define E_INVAL 3         // 非法参数
+#define E_NO_MEM 4        // 内存不足
+#define E_NO_SYS 5        // 不存在的系统调用
+#define E_NO_FREE_ENV 6   // 创建进程时超过允许的最大进程数
+#define E_IPC_NOT_RECV 7  // 向一个未在接收消息的进程发送消息
+```
+
+### 系统调用列表
+
+你需要实现的，完整的系统调用列举如下：
+
+| 系统调用号 | 系统调用           | 描述                                             |
+| :--------- | :----------------- | :----------------------------------------------- |
+| 0          | SYS_putchar        | 向控制台输出一个字符                             |
+| 1          | SYS_print_cons     | 输出一个字符串                                   |
+| 2          | SYS_getenvid       | 获取当前进程的进程ID                             |
+| 3          | SYS_yield          | 进程主动放弃自己的CPU时间                        |
+| 4          | SYS_env_destroy    | 销毁一个进程                                     |
+| 5          | -                  | 不使用                                           |
+| 6          | SYS_mem_alloc      | 申请一页内存                                     |
+| 7          | SYS_mem_map        | 将一个虚拟地址映射到另一个虚拟地址所影射的物理页 |
+| 8          | SYS_mem_unmap      | 解除一个虚拟地址的映射                           |
+| 9          | SYS_exofork        | 创建一个新的进程                                 |
+| 10         | SYS_env_set_status | 设置进程的状态                                   |
+| 11         | -                  | 不使用                                           |
+| 12         | SYS_panic          | 引发内核panic                                    |
+| 13         | SYS_ipc_try_send   | 尝试向一个进程发送消息                           |
+| 14         | SYS_ipc_recv       | 标记自己为接收消息状态                           |
+| 15         | SYS_cgetc          | 从控制台读取一个字符                             |
+| 16         | SYS_write_dev      | 向设备写入数据                                   |
+| 17         | SYS_read_dev       | 从设备读取数据                                   |
+
+各系统调用的具体描述如下：
+
+- SYS_putchar
+
+  :
+
+  - `int64_t syscall_putchar(int64_t ch);`
+  - 功能：向控制台输出单个ascii字符。
+  - 参数：
+    - `ch`：要输出的字符，范围应在 `0x00-0x7F` 之间。
+  - 返回值：
+  - `E_INVAL`：参数 `ch` 不在合法范围内。
+  - `E_SUCCESS`：成功。
+
+- SYS_print_cons
+
+  :
+
+  - `int64_t syscall_print_cons(const void *s, uint64_t num);`
+  - 功能：向控制台输出以 `s` 为起始地址的字符串，共输出 `num` 个字符。
+  - 参数：
+    - `s`：字符串的起始地址。
+    - `num`：输出的字符数。
+  - 返回值：
+  - `E_INVAL`：`[(uint64_t)s,(uint64_t)s+num]` 超过用户地址空间范围，溢出，或是覆盖了未映射的区域。
+  - `E_SUCCESS`：成功。
+
+- SYS_getenvid
+
+  :
+
+  - `uint64_t syscall_getenvid();`
+  - 功能：获取当前进程的进程ID。
+  - 参数：无。
+  - 返回值：当前进程的进程ID。
+
+- SYS_yield
+
+  :
+
+  - `void syscall_yield();`
+  - 功能：放弃剩余的时间片，立刻调度其他进程。
+  - 参数：无。
+  - 返回值：`E_SUCCESS`
+
+- SYS_env_destroy
+
+  :
+
+  - `int64_t syscall_env_destroy(uint64_t envid);`
+  - 功能：销毁当前进程或一个子进程。
+  - 参数：
+    - `envid`：要销毁的进程的进程ID，若为0则销毁当前进程。
+  - 返回值：
+  - `E_BAD_ENV`：`envid` 对应的进程不存在，或者缺乏权限。
+  - `E_SUCCESS`：成功。
+
+- SYS_mem_alloc
+
+  :
+
+  - `int64_t syscall_mem_alloc(uint64_t envid, uint64_t va, uint64_t perm);`
+
+  - 功能：为当前进程或其子进程分配一页内存，映射到指定的虚拟地址。若指定的 `va` 已经映射，则解除先前的映射。
+
+  - 参数：
+
+    - `envid`：要分配内存的进程ID，若为0则分配当前进程。
+
+    - `va`：要分配的虚拟地址，应按4KiB对齐。
+
+    - ```
+      perm
+      ```
+
+      ：页面权限。至少应当包含
+
+       
+
+      ```
+      PTE_READ
+      ```
+
+       
+
+      ，3-63位应当设置为0。
+
+      ```
+      #define PTE_READ 0x1
+      #define PTE_WRITE 0x2
+      #define PTE_EXEC 0x4
+      ```
+
+  - 返回值：
+
+    - `E_BAD_ENV`：`envid` 对应的进程不存在，或者缺乏权限。
+    - `E_INVAL`：`va` 不是页对齐的，不在用户地址空间内，或者 `perm` 不合法。
+    - `E_NO_MEM`：内存不足。
+    - `E_SUCCESS`：成功。
+
+- SYS_mem_map
+
+  :
+
+  - `int64_t syscall_mem_map(uint64_t srcid, uint64_t srcva, uint64_t dstid, uint64_t dstva, uint64_t perm);`
+  - 功能：将 `srcid` 进程的 `srcva` 映射到 `dstid` 进程的 `dstva`。`srcid` 进程与 `dstid` 进程均应为当前进程或其子进程。
+  - 参数：
+    - `srcid`：源进程ID。
+    - `srcva`：源进程的虚拟地址。
+    - `dstid`：目标进程ID。
+    - `dstva`：目标进程的虚拟地址。
+    - `perm`：页面权限。至少应当包含 `PTE_READ`，3-63位应当设置为0。
+  - 返回值：
+    - `E_BAD_ENV`：进程ID `srcid` 或 `dstid` 对应的进程不存在，或者缺乏权限。
+    - `E_INVAL`：`srcva` 或 `dstva` 不是页对齐的，不在用户地址空间内，`srcva` 未映射，或者 `perm` 不合法。
+    - `E_SUCCESS`：成功。
+
+- SYS_mem_unmap
+
+  :
+
+  - `int64_t syscall_mem_unmap(uint64_t envid, uint64_t va);`
+  - 功能：解除 `envid` 进程的 `va` 的映射。
+  - 参数：
+    - `envid`：要解除映射的进程ID。
+    - `va`：要解除映射的虚拟地址。
+  - 返回值：
+    - `E_BAD_ENV`：`envid` 对应的进程不存在，或者缺乏权限。
+    - `E_INVAL`：`va` 不是页对齐的，不在用户地址空间内，或者未映射。
+    - `E_SUCCESS`：成功。
+
+- SYS_exofork
+
+  :
+
+  - `int64_t syscall_exofork();`
+  - 功能：创建一个子进程。
+  - 参数：无。
+  - 返回值：
+    - `E_NO_FREE_ENV`：进程数超过限制。
+    - `E_SUCCESS`：成功。
+  - 注：请参考下文"fork 与 IPC"一节
+
+- SYS_env_set_status
+
+  :
+
+  - `int64_t syscall_env_set_status(uint64_t envid, uint64_t status);`
+
+  - 功能：设置当前进程或其子进程的状态。
+
+  - 参数：
+
+    - `envid`：要设置状态的进程ID。
+
+    - ```
+      status
+      ```
+
+      ：要设置的状态。 状态为以下两种之一：
+
+      ```
+      #define ENV_RUNNABLE 1
+      #define ENV_NOT_RUNNABLE 2
+      ```
+
+  - 返回值：
+
+    - `E_BAD_ENV`：`envid` 对应的进程不存在，或者缺乏权限。
+    - `E_INVAL`：`status` 不合法。
+    - `E_SUCCESS`：成功。
+
+- SYS_panic
+
+  :
+
+  - `void syscall_panic(const char *msg);`
+  - 功能：引发内核 panic。
+  - 参数：
+    - `msg`：错误信息。
+  - 返回值：不返回。
+
+- SYS_ipc_try_send
+
+  :
+
+  - `int64_t syscall_ipc_try_send(uint64_t envid, uint64_t value, uint64_t srcva, uint64_t perm);`
+  - 功能：尝试向`envid`进程发送消息。
+  - 参数：
+    - `envid`：接收消息的进程ID。
+    - `value`：消息的值。
+    - `srcva`：要共享的页，为`NULL`则不共享。
+    - `perm`：共享的页的权限。
+  - 返回值：
+    - `E_BAD_ENV`：`envid`对应的进程不存在。
+    - `E_IPC_NOT_RECV`：`envid` 进程未准备接收消息。
+    - `E_INVAL`：`srcva` 不是页对齐的，不在用户地址空间内，或者 `perm` 不合法。
+    - `E_SUCCESS`：成功。
+  - **将接收方栈帧的 `a0` 寄存器设置为 `value`**
+
+- SYS_ipc_recv
+
+  :
+
+  - `int64_t syscall_ipc_recv(uint64_t dstva);`
+  - 功能：标记当前进程为接收消息状态，停止运行直到收到消息。
+  - 参数：
+    - `dstva`：映射共享页的地址，为 `NULL` 则不接收。
+  - 返回值：**在`syscall_ipc_try_send`中设置返回值**
+
+- SYS_cgetc
+
+  :
+
+  - `int64_t syscall_cgetc();`
+  - 功能：从控制台读取一个字符，阻塞所有进程直到读取到字符。
+  - 参数：无。
+  - 返回值：读取到的字符。
+
+- SYS_write_dev
+
+  :
+
+  - `int64_t syscall_write_dev(uint64_t va, uint64_t pa, uint64_t len);`
+  - 功能：向 `pa` 设备物理地址写入位于 `va` 虚拟地址的 `len` 字节数据。
+  - 参数：
+    - `va`：虚拟地址。
+    - `pa`：设备物理地址。
+    - `len`：数据长度，对齐到2的幂。
+  - 返回值：
+    - `E_INVAL`：`va` 不在用户地址空间内，`pa` 不是设备地址，或者 `len` 不是2的幂。
+    - `E_SUCCESS`：成功。
+
+- SYS_read_dev
+
+  :
+
+  - `int64_t syscall_read_dev(uint64_t va, uint64_t pa, uint64_t len);`
+  - 功能：从 `pa` 设备物理地址读取 `len` 字节数据到 `va` 虚拟地址。
+  - 参数：
+    - `va`：虚拟地址。
+    - `pa`：设备物理地址。
+    - `len`：数据长度，对齐到2的幂。
+  - 返回值：
+    - `E_INVAL`：`va` 不在用户地址空间内，`pa` 不是设备地址，或者 `len` 不是2的幂。
+    - `E_SUCCESS`：成功。
+
+### fork 与 IPC
+
+你需要实现支持**内核态** 写时复制 (Copy on Write, CoW) 机制的 fork。
+
+在 MOS 中，fork 的机制几乎全部在用户态实现，内核仅负责分配新进程，这种方式在实际的操作系统中应用较少。本任务中，你需要将复制进程的上下文、以 CoW 方式复制地址空间等操作放在内核态完成。
+
+如上文“页表和页表项”一节所述，页表项的 `USW` 位保留给软件自由使用。复制页面时，你可以清除 PTE 的写权限，并将 CoW 标记位存放在 `USW` 位中，在写入异常发生时检查 CoW 标记。
+
+IPC 通信与 MOS 行为几乎一致，除了**IPC接收的消息通过 `syscall_ipc_recv` 的返回值（`a0`）传递**。
+
+### 文件系统
+
+支持 `virtio` 设备的文件系统已经在用户态实现，你需要将设备的MMIO地址开放给用户程序访问。
+
+你需要在 QEMU 的启动参数中添加 `-drive file=rootfs.img,format=raw,if=none,id=hd0 -device virtio-blk-device,drive=hd0`， 以将 `rootfs.img` 文件映射到 `virtio` 设备上。
+
+## 用户程序
+
+用户程序和更详细的指示将在后续发布。
+
+## 可选项
+
+下方的所有条目供感兴趣的同学选择了解，实现与否不会影响任务的评分。
+
+### 实现字符设备驱动
+
+SBI 提供了一套基础的字符输入输出接口，但这种方式更多考虑了兼容性，扩展性不足，难以应对多设备和复杂 I/O 需求。 并且，每次输出字符/字符串都需要 SBI 调用，效率不高。合理的内核会自行实现字符设备驱动，以便更好地管理设备，提供高效的I/O服务。
+
+QEMU `virt` 机器模拟了一块 `NS16550A UART` 串口设备，通过设备树我们可以知道这个设备的定义：
+
+```
+serial@10000000 {
+    interrupts = <0x0a>;
+    interrupt-parent = <0x09>;
+    clock-frequency = "", "8@";
+    reg = <0x00 0x10000000 0x00 0x100>;
+    compatible = "ns16550a";
+};
+```
+
+可知设备基地址为 `0x1000_0000`，通过读写此地址附近的寄存器，即可与设备进行通信。
+
+参考资料： - [NS16550](https://en.wikipedia.org/wiki/NS16550) - [The NS16550A: UART Design and Applications Considerations](https://bitsavers.trailing-edge.com/components/national/_appNotes/AN-0491.pdf) - [OpenSBI NS16550A 驱动](https://github.com/riscv-software-src/opensbi/blob/master/lib/utils/serial/uart8250.c) - [MOS kern/machine.c](https://github.com/buaa-os/mos.public/blob/master/lab-solution/mips32/kern/machine.c) （是的, MOS 实现了 NS16550 驱动，二者是兼容的）
+
+### 设备树解析
+
+> **注**： 如果未选择该可选项也可以选择硬编码硬件信息的方式。若如此，你仍可以通过本节最下方的命令获取设备信息。
+>
+> **设备树** 是一种数据结构，用于描述硬件设备的属性和配置以及其之间的关系。它通常以树结构组织，每个节点代表系统中的一个硬件组件，包括CPU,内存,外设等。设备树可由文本形式的**设备树源文件(.dts)**文件描述，该文件可通过编译器转化为**设备树二进制文件(.dtb)**,该文件在系统启动时被内核读取（OpenSBI在启动时通过 `a1` 寄存器传递了设备树地址）。
+>
+> **平板设备树(FDT)** 是设备树的一种表现形式，它将设备树结构扁平成一个二进制文件，便于读取和解析。
+
+你可以实现对 FDT 的简易解析以获得内存的分布，外设的地址等内容用于设备的注册和使用(对于不同设备的使用和注册，不妨创建设备和相应的操作抽象，根据解析出的节点，对相应的设备设置相应的操作结构体即可；对于多个设备，则可以采用树进行管理)。
+
+设备树的具体内容可以参考：
+
+- [设备树文档1](https://github.com/devicetree-org/devicetree-specification/releases/tag/v0.4)
+- [设备树文档2](https://zhuanlan.zhihu.com/p/425420889)
+- [FDT文档1](https://devicetree-specification.readthedocs.io/en/stable/flattened-format.html)
+- [FDT文档2](https://zhuanlan.zhihu.com/p/425420889)
+
+你可以通过如下命令获取 `virt` 机器的 `.dtb` 文件，并将其转换为人类可读的 `.dts` :
+
+```
+qemu-system-riscv64 -machine virt,dumpdtb=virt.dtb
+dtc -I dtb -O dts virt.dtb -o virt.dts
+```
+
+### (C)mem函数优化
+
+MOS中 `memcpy` 与 `memset` 等函数是针对32位架构优化的，你可以通过简单的修改来适配64位架构。
+
+### 移动内核至高地址
+
+低地址空间在操作系统中是十分宝贵的。将内核空间放在高地址空间，不仅可以增强系统的安全性，还可以使得用户空间连续，便于用户程序的地址空间管理。
+
+Sv39 分页模式支持 512 GiB 的地址空间，根据虚拟地址的第 39 位是否设置（带符号扩展到64位），划分为 `0x0000_0000_0000_0000-0x0000_003F_FFFF_FFFF` 和 `0xFFFF_FFC0_0000_0000-0xFFFF_FFFF_FFFF_FFFF` 两个区域。默认情况下，内核位于 `0x0000_0000_8020_0000` 之后的低地址，你可以将内核移动到高地址空间。
+
+一种可行的方式是修改链接脚本，将内核的起始地址设置为高地址，并借助 LMA（Load Memory Address）机制，将内核加载到低地址。在入口函数中，你需要启用分页机制，将内核的虚拟地址映射到物理地址，然后跳转到高地址执行。
+
+链接脚本示例如下：
+
+```
+OUTPUT_ARCH(riscv)
+
+ENTRY(_start)
+
+LOAD_ADDR = 0x8020_0000;         # 加载地址
+BASE_ADDR = 0xffff_ffff_8020_0000; # 高地址
+
+SECTIONS
+{
+    . = BASE_ADDRESS;
+
+    .text : AT(LOAD_ADDR)
+    {
+        *(.text.boot)
+        *(.text)
+    }
+
+    # 其他段
+}
+```
+
+- [Linker Script LMA 介绍](https://sourceware.org/binutils/docs/ld/Output-Section-LMA.html)
+
+### (C)简易kmalloc
+
+>  kmalloc 是 Linux 内存管理中的一种内存分配机制，用于分配物理地址连续，虚拟地址连续的小块内存，被用来处理特定要求包括缓冲区的动态分配，PCB和其他资源的创建等。在MOS中所有的资源描述符如 Page ，Env 等提前分配在了 BSS 段中，这其实并不安全。通过将 kmalloc 所管理的内存映射到某一高地址，可以很好地将内核管理资源和内核所隔离。
+
+如上所述，你可以选取一种内存管理技术(如伙伴系统)，划分出某一段连续物理内存并将其映射到某一地址区域，用于内核特殊要求。
+
+### 支持巨页
+
+巨页 (Huge Pages) 技术通过使用更大的内存页尺寸来管理内存，相比标准页，能显著降低地址转换开销，并提升内存访问效率。
+
+在 RISC-V 中，任何级别的页表项若 `XWR` 位不为 `0b000` ，则表示对应的页表项为叶页表项，用于映射物理页。以 Sv39 为例： - **0级页表项**只能对应单个4KiB物理页帧。 - **1级页表项**既可以指向0级页表，也可直接映射 2MiB (512 * 4KiB) 巨页。 - **2级页表项**可以指向1级页表，也可直接映射 1GiB (512 * 2MiB) 巨页。
+
+这些页都必须满足**物理地址和虚拟地址边界对齐其大小**的要求，否则会产生页错误异常。
+
+你可以在你实现的页表功能中增加对巨页的支持，并用巨页来映射内核等大内存占用从而提高地址转换效率。为了实现巨页映射，你还需要实现能分配同等巨页大小的连续物理内存的分配器。
+
+### S态时钟中断
+
+>  RISC-V拥有许多已经成为标准，或者正在成为标准的扩展，`Sstc` 扩展增加了S态 `stimecmp` CSR，当 `time` 寄存器(一个S态和U态均可访问的 CSR)的值大于或等于 `stimecmp` 时，会产生S态时钟中断。利用该扩展，我们可以在S态直接通过 CSR 设置时钟中断。
+
+### 中断向量化
+
+在 RISC-V 中 `stvec` 寄存器 `Mode` 位可以设置陷阱处理的模式。当 `Mode` 为 `0b00` 时，所有的异常和中断都会直接跳转到 `stvec` 寄存器所设置的异常入口；当 `Mode` 为 `0b01` 时，异常会跳转到 `stvec` 寄存器所设置的异常入口基地址，而中断则会根据中断号直接跳转到 `base + 4 * i` （`i` 为中断号）的地址。你可以利用这点来加速中断处理。
+
+编译器为中断函数提供了额外的优化。通过 C `__attribute__ ((interrupt("supervisor")))` 或 Rust `extern "riscv-interrupt-s"` 修饰函数，编译器会根据处理函数中的寄存器使用情况处理上下文保存和恢复，比手动保存和恢复上下文更高效。
+
+请参考[M态中断向量表示例](https://five-embeddev.com/baremetal/vectored_interrupts/)
+
+### 多核调度
+
+> 在**对称多处理**（Symmetric Multi Processing, SMP）架构下，若干个相同的 CPU 核心共享同一主存，并且具有完全相同的访问权限。SMP 有时也被称为UMA(统一内存访问)，和它相对应的是 NUMA (非统一内存访问，在该架构中，处理器被分组到不同的节点，并且都有自己的本地内存)。
+
+你需要使内核能在多个核心上运行，使调度器能在多个核心上正确地调度进程。
+
+你需要为每个核心分配独立的内核栈，利用原子操作、中断屏蔽等机制实现信号量、互斥锁等同步机制，在多核共用的内核数据结构上加锁以保证并发安全。
+
+#### SBI 与多核初始化
+
+OpenSBI为CPU核心设计了一套状态机，OpenSBI会使用 `lottery` 算法随机选取一个核心作为启动核通过 `init_coldboot` 函数进入内核，其他核心则是通过 `init_warmboot` 在M态OpenSBI内部初始化后将自身状态修改为 `STOPPED` ，等待内核初始化后被唤醒。当你在主核心中初始化资源完成后，就可以通过SBI调用来启动其他核心（具体来说，通过 `hsm` 扩展提供的 `sbi_hart_start` 接口）。
+
+核心闲置时，你可以使用 `wfi` 指令使其进入低功耗状态，随后通过核间中断（SBI `ipi` 扩展）来唤醒它们。
+
+当核心启动时，OpenSBI 会将 `a0` 寄存器设置为当前核心的 `hartid` 。因为S态程序不能访问 `mhartid` 寄存器，这是你通常情况下**唯一**获取当前核心ID的机会。你需要根据 `hartid` 设置本核心专属的栈。你可以将 `hartid` 存放在 `gp` 或 `tp` 寄存器中，以便在S态程序中访问专属于本核心的资源。
+
+#### 锁
+
+RISC-V的 `A` 扩展提供了原子内存访问指令。原子操作保证了**读-修改-写**这一系列操作在执行过程中是不可中断的，即要么完全执行，要么完全不执行，不会被其他线程或处理器核心的访问所干扰。
+
+但在实现时，我们不必直接使用汇编指令。C11 标准提供了 `<stdatomic.h>` 头文件，其中定义了一系列原子操作函数，Rust 的 `core::sync::atomic` 模块提供了类似的封装，你可以使用这些抽象来实现锁机制。
+
+要正确使用原子操作，你需要了解内存序（Memory Order）的概念。C、C++、Rust采用了同一套内存模型，[Cppreference std::memory_order](https://en.cppreference.com/w/cpp/atomic/memory_order)对这套模型提供了详细的说明。
+
+请注意，单独的自旋锁在发生中断时可能导致死锁，你需要在锁的实现中考虑需要关闭中断的情况。
+
+#### 调度
+
+你可以实现全局调度，使用一个队列然后使用每个核心运行其中的进程，或者是实现分区调度，让每个核心拥有自己的队列。无论何种方式，你必须保证一个进程同时只能在一个核心上运行。
+
+### 多级反馈队列调度
+
+>  不同于完全公平的时间片轮转算法，**多级队列**算法将一个就绪队列拆分为多个，并且将不同类型的进程分配在不同的就绪队列，这些队列可以采用不同的调度算法。**多级反馈队列**为每个队列赋予不同的优先级，优先级越高，时间片越少，一旦用完则会降低优先级到下一级队列，这既能使高优先级进程得到响应又能让短进程迅速完成，被公认为一种较好的调度算法。
+
+你可以尝试实现多级调度队列算法来进行进程调度，关于该算法的内容可以参考教材和[多级反馈队列](https://zhuanlan.zhihu.com/p/367636084)。
+
+### 上板
+
+课程组提供 `starfive-v2` 等开发板，你可以尝试在实体设备上运行你的内核。
