@@ -9,6 +9,9 @@
 #define SCAUSE_CODE_MASK ((1UL << 63) - 1)
 #define SCAUSE_SUPERVISOR_TIMER 5
 #define SCAUSE_ECALL_FROM_U 8
+#define SCAUSE_INST_PAGE_FAULT 12
+#define SCAUSE_LOAD_PAGE_FAULT 13
+#define SCAUSE_STORE_PAGE_FAULT 15
 
 struct Trapframe {
 	reg_t regs[TRAPFRAME_REGS];

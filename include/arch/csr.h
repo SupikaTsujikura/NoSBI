@@ -12,7 +12,27 @@
 #define SIE_STIE (1UL << 5)
 #define SIE_SEIE (1UL << 9)
 
+#define SIP_SSIP (1UL << 1)
+#define SIP_STIP (1UL << 5)
+#define SIP_SEIP (1UL << 9)
+
 #define SCAUSE_INTERRUPT (1UL << 63)
+
+static inline reg_t csr_read_satp(void) {
+	reg_t value;
+	asm volatile("csrr %0, satp" : "=r"(value));
+	return value;
+}
+
+static inline void csr_write_satp(reg_t value) {
+	asm volatile("csrw satp, %0" :: "r"(value) : "memory");
+}
+
+static inline reg_t csr_swap_satp(reg_t value) {
+	reg_t old;
+	asm volatile("csrrw %0, satp, %1" : "=r"(old) : "r"(value) : "memory");
+	return old;
+}
 
 static inline reg_t csr_read_sstatus(void) {
 	reg_t value;
@@ -64,12 +84,29 @@ static inline reg_t csr_read_sie(void) {
 	return value;
 }
 
+static inline reg_t csr_read_sip(void) {
+	reg_t value;
+	asm volatile("csrr %0, sip" : "=r"(value));
+	return value;
+}
+
+static inline void csr_write_sip(reg_t value) {
+	asm volatile("csrw sip, %0" :: "r"(value));
+}
+
 static inline void csr_set_sstatus(reg_t value) {
 	asm volatile("csrs sstatus, %0" :: "r"(value));
 }
 
 static inline void csr_clear_sstatus(reg_t value) {
 	asm volatile("csrc sstatus, %0" :: "r"(value));
+}
+
+static inline reg_t csr_read_clear_sstatus(reg_t value) {
+	reg_t old;
+
+	asm volatile("csrrc %0, sstatus, %1" : "=r"(old) : "r"(value) : "memory");
+	return old;
 }
 
 static inline void wfi(void) {

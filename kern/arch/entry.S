@@ -4,12 +4,16 @@
 .align 2
 .global trap_entry
 trap_entry:
+	csrr t6, sstatus
+	andi t6, t6, 0x100
+	bnez t6, kernel_trap_entry
 	csrrw sp, sscratch, sp
 	addi sp, sp, -TRAPFRAME_SIZE
 	sd zero, 0(sp)
 	sd ra,   8(sp)
-	csrr t0, sscratch
-	sd t0,  16(sp)
+	sd t6, 248(sp)
+	csrr t6, sscratch
+	sd t6,  16(sp)
 	sd gp,  24(sp)
 	sd tp,  32(sp)
 	sd t0,  40(sp)
@@ -38,7 +42,6 @@ trap_entry:
 	sd t3, 224(sp)
 	sd t4, 232(sp)
 	sd t5, 240(sp)
-	sd t6, 248(sp)
 
 	csrr t6, sstatus
 	sd t6, 256(sp)
@@ -86,7 +89,18 @@ trap_entry:
 	ld t3, 224(sp)
 	ld t4, 232(sp)
 	ld t5, 240(sp)
+	la t6, boot_stack_top
+	csrw sscratch, t6
 	ld t6, 248(sp)
 	ld sp,  16(sp)
-	csrrw sp, sscratch, sp
 	sret
+
+kernel_trap_entry:
+	csrr a0, scause
+	csrr a1, sepc
+	csrr a2, stval
+	la sp, boot_stack_top
+	call kernel_trap_panic
+1:
+	wfi
+	j 1b

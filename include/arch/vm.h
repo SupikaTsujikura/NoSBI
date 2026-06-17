@@ -6,6 +6,11 @@
 #define DRAM_BASE 0x80000000UL
 #define PHYS_MEMORY_SIZE (2UL * 1024 * 1024 * 1024)
 
+#define CLINT_BASE 0x02000000UL
+#define PLIC_BASE 0x0c000000UL
+#define UART0_BASE 0x10000000UL
+#define VIRTIO0_BASE 0x10001000UL
+
 #define SATP_MODE_SV39 (8UL << 60)
 
 #define PT_ENTRIES 512UL
@@ -34,6 +39,14 @@
 #define PTE2PA(pte) (((pte) >> PTE_PPN_SHIFT) << PAGE_SHIFT)
 #define PA2PTE(pa) ((((uint64_t)(pa)) >> PAGE_SHIFT) << PTE_PPN_SHIFT)
 #define PTE_IS_LEAF(pte) ((pte) & (PTE_R | PTE_W | PTE_X))
+
+struct UserPageInfo {
+	uint64_t va;
+	uint64_t pa;
+	uint64_t perm;
+	uint32_t ref;
+	uint32_t present;
+};
 
 static inline int sv39_is_canonical(vaddr_t va) {
 	uint64_t top = va >> 39;
