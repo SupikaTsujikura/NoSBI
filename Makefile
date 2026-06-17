@@ -32,6 +32,7 @@ KERN_SRCS := \
 	kern/pmap.c \
 	kern/env.c \
 	kern/sched.c \
+	kern/syscall.c \
 	kern/arch/sbi.c \
 	kern/arch/trap.c \
 	kern/device/console.c \
@@ -40,7 +41,7 @@ KERN_SRCS := \
 	lib/print.c \
 	lib/string.c
 
-KERN_OBJS := $(KERN_SRCS:.c=.o) kern/arch/boot.o kern/arch/entry.o
+KERN_OBJS := $(KERN_SRCS:.c=.o) kern/arch/boot.o kern/arch/entry.o kern/arch/context.o user/demo.o
 
 QEMU_FLAGS := -machine virt -m 2G -nographic -bios default -kernel $(KERNEL_ELF)
 

@@ -1,11 +1,15 @@
 .equ TRAPFRAME_SIZE, 288
 
 .section .text
+.align 2
 .global trap_entry
 trap_entry:
+	csrrw sp, sscratch, sp
 	addi sp, sp, -TRAPFRAME_SIZE
 	sd zero, 0(sp)
 	sd ra,   8(sp)
+	csrr t0, sscratch
+	sd t0,  16(sp)
 	sd gp,  24(sp)
 	sd tp,  32(sp)
 	sd t0,  40(sp)
@@ -35,8 +39,6 @@ trap_entry:
 	sd t4, 232(sp)
 	sd t5, 240(sp)
 	sd t6, 248(sp)
-	addi t6, sp, TRAPFRAME_SIZE
-	sd t6,  16(sp)
 
 	csrr t6, sstatus
 	sd t6, 256(sp)
@@ -86,4 +88,5 @@ trap_entry:
 	ld t5, 240(sp)
 	ld t6, 248(sp)
 	ld sp,  16(sp)
+	csrrw sp, sscratch, sp
 	sret

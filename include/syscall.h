@@ -21,4 +21,6 @@ enum {
 	MAX_SYSNO,
 };
 
+void syscall_dispatch(void);
+
 #endif

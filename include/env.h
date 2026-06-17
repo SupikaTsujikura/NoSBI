@@ -3,6 +3,7 @@
 
 #include <arch/riscv.h>
 #include <arch/trap.h>
+#include <pmap.h>
 #include <queue.h>
 #include <types.h>
 
@@ -23,6 +24,8 @@ struct Env {
 	TAILQ_ENTRY(Env) env_sched_link;
 	uint32_t env_pri;
 	uint64_t env_runs;
+	pagetable_t env_pgtable;
+	reg_t env_satp;
 	char env_name[16];
 };
 
@@ -37,6 +40,6 @@ extern struct Env_sched_list env_sched_list;
 void env_init(void);
 int env_alloc(struct Env **new_env, uint64_t parent_id, const char *name, uint32_t priority);
 void env_set_status(struct Env *env, uint32_t status);
-struct Env *env_create_kernel_demo(const char *name, uint32_t priority);
+struct Env *env_create_user_demo(const char *name, uint32_t priority, int ch);
 
 #endif

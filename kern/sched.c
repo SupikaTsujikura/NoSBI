@@ -1,21 +1,13 @@
+#include <arch/context.h>
 #include <env.h>
 #include <printk.h>
 #include <sched.h>
+#include <syscall.h>
 
 static int sched_slices;
 
 void sched_init(void) {
 	sched_slices = 0;
-}
-
-static void env_run(struct Env *env) {
-	struct Env *prev = curenv;
-	curenv = env;
-	env->env_runs++;
-	if (prev != env) {
-		printk("  schedule -> env=0x%lx runs=%lu name=%s\n", env->env_id, env->env_runs,
-		       env->env_name[0] ? env->env_name : "(unnamed)");
-	}
 }
 
 void schedule(int yield) {
@@ -28,12 +20,15 @@ void schedule(int yield) {
 		}
 		env = TAILQ_FIRST(&env_sched_list);
 		if (env == NULL) {
-			curenv = NULL;
-			return;
+			panic("schedule: no runnable envs");
 		}
 		sched_slices = env->env_pri;
 	}
 
 	sched_slices--;
-	env_run(env);
+	curenv = env;
+	env->env_runs++;
+	printk("  schedule -> env=0x%lx runs=%lu name=%s\n", env->env_id, env->env_runs,
+	       env->env_name[0] ? env->env_name : "(unnamed)");
+	env_pop_tf(&env->env_tf, env->env_satp);
 }

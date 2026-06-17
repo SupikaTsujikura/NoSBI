@@ -5,6 +5,7 @@
 
 #define SSTATUS_SIE  (1UL << 1)
 #define SSTATUS_SPIE (1UL << 5)
+#define SSTATUS_SUM  (1UL << 18)
 #define SSTATUS_SPP  (1UL << 8)
 
 #define SIE_SSIE (1UL << 1)

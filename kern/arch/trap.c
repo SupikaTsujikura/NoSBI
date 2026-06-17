@@ -1,8 +1,10 @@
 #include <arch/csr.h>
 #include <arch/sbi.h>
 #include <arch/trap.h>
+#include <env.h>
 #include <printk.h>
 #include <sched.h>
+#include <syscall.h>
 
 #define TIMER_INTERVAL 1000000UL
 
@@ -32,7 +34,12 @@ static void handle_interrupt(struct Trapframe *tf) {
 static void handle_exception(struct Trapframe *tf) {
 	switch (tf->scause) {
 	case SCAUSE_ECALL_FROM_U:
-		panic("user ecall handling is not implemented yet");
+		if (curenv == NULL) {
+			panic("ecall without current env");
+		}
+		curenv->env_tf.sepc += 4;
+		syscall_dispatch();
+		break;
 	default:
 		print_tf(tf);
 		panic("unhandled exception scause=%016lx", tf->scause);
@@ -48,6 +55,9 @@ void trap_init(void) {
 }
 
 void trap_entry_c(struct Trapframe *tf) {
+	if (curenv != NULL) {
+		curenv->env_tf = *tf;
+	}
 	if (tf->scause & SCAUSE_INTERRUPT) {
 		handle_interrupt(tf);
 	} else {

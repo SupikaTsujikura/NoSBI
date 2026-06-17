@@ -56,7 +56,7 @@ void page_init(void) {
 	freemem = ROUND(freemem, PAGE_SIZE);
 
 	paddr_t used_end = (paddr_t)freemem;
-	for (u_long i = 0; i < npage; i++) {
+	for (long i = (long)npage - 1; i >= 0; i--) {
 		struct Page *pp = &pages[i];
 		paddr_t pa = DRAM_BASE + ((paddr_t)i << PAGE_SHIFT);
 		if (pa < used_end) {

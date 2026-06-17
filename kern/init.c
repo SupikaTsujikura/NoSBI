@@ -5,6 +5,8 @@
 #include <printk.h>
 #include <sched.h>
 
+extern char trap_entry[];
+
 void kmain(void) {
 	csr_clear_sstatus(SSTATUS_SIE);
 	printk("MOS/RISC-V bootstrap\n");
@@ -23,22 +25,22 @@ void kmain(void) {
 	vm_enable();
 	printk("  satp enabled, kernel still alive\n");
 
+	csr_write_stvec((reg_t)(uintptr_t)trap_entry);
+	printk("  early trap vector installed at 0x%016lx\n", csr_read_stvec());
+
+	printk("  env_init begin\n");
 	env_init();
+	printk("  env_init done\n");
 	sched_init();
-	env_create_kernel_demo("idle", 1);
-	env_create_kernel_demo("worker-a", 2);
-	env_create_kernel_demo("worker-b", 1);
+	printk("  sched_init done\n");
+	env_create_user_demo("user-a", 1, 'A');
+	printk("  user-a loaded\n");
+	env_create_user_demo("user-b", 1, 'B');
+	printk("  user-b loaded\n");
 
 	trap_init();
 	printk("  trap handler installed at 0x%016lx\n", csr_read_stvec());
-	printk("  waiting for 5 timer interrupts and scheduler rotations...\n");
-	while (timer_ticks < 5) {
-		wfi();
-	}
-	printk("  observed %lu timer interrupts\n", timer_ticks);
-	if (curenv != NULL) {
-		printk("  current env after scheduling: 0x%lx (%s), runs=%lu\n", curenv->env_id,
-		       curenv->env_name, curenv->env_runs);
-	}
-	panic("kernel bootstrap complete; next step is syscall and user-mode bring-up");
+	printk("  entering first user env via scheduler...\n");
+	schedule(1);
+	panic("schedule unexpectedly returned to kmain");
 }
