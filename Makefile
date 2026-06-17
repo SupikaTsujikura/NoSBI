@@ -45,7 +45,7 @@ KERN_OBJS := $(KERN_SRCS:.c=.o) kern/arch/boot.o kern/arch/entry.o kern/arch/con
 
 QEMU_FLAGS := -machine virt -m 2G -nographic -bios default -kernel $(KERNEL_ELF)
 
-.PHONY: all clean run debug objdump
+.PHONY: all clean run debug objdump test test-build
 
 all: $(KERNEL_ELF) $(KERNEL_BIN)
 
@@ -73,5 +73,12 @@ debug: $(KERNEL_ELF)
 objdump: $(KERNEL_ELF)
 	$(OBJDUMP) -aldS $(KERNEL_ELF) > $(KERNEL_ELF).objdump
 
+test-build: $(KERNEL_ELF)
+	$(MAKE) --directory=test ROOT_DIR=$(CURDIR) all
+
+test: $(KERNEL_ELF)
+	$(MAKE) --directory=test ROOT_DIR=$(CURDIR) KERNEL_ELF=$(CURDIR)/$(KERNEL_ELF) test
+
 clean:
 	rm -rf $(TARGET_DIR) $(KERN_OBJS)
+	$(MAKE) --directory=test ROOT_DIR=$(CURDIR) clean

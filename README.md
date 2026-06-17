@@ -1,379 +1,351 @@
-# MOS on RISC-V: current porting status
+# MOS RISC-V 移植当前状态
 
-This directory now contains an **early C-based RV64 MOS port skeleton** that boots on QEMU `virt`, enables Sv39 paging, handles timer interrupts, and now has a first Env/scheduler skeleton wired into those interrupts.
+本目录现在包含一个**基于 C 的 RV64 MOS 早期移植骨架**。它已经能够在 QEMU `virt` + OpenSBI 环境下启动，完成 Sv39 基础分页，处理时钟中断，具备第一版 Env/调度器骨架，并且已经打通了**最小 U 态 + 最小 syscall + 自动化测试**闭环。
 
-## What has been implemented
+---
 
-This repository now covers four early milestones from [docs/RISC-V 移植.md](docs/RISC-V%20移植.md):
+## 一、当前已经实现的内容
 
-1. **kernel boot + character output**
-2. **initial Sv39 memory-management bring-up**
-3. **initial trap entry + timer interrupt handling**
-4. **initial Env table + runnable scheduling skeleton**
+目前已经覆盖了 [docs/RISC-V 移植.md](docs/RISC-V%20移植.md) 中前几个关键里程碑的最小可运行版本：
 
-Implemented pieces:
+1. **内核启动与字符输出**
+2. **Sv39 基础内存管理 bring-up**
+3. **Trap 入口与时钟中断处理**
+4. **Env 表与 runnable 调度骨架**
+5. **最小 U 态执行与最小 syscall 闭环**
+6. **自动化测试入口 `make test`**
 
-- **Standalone RV64 build system**
-  - Added [Makefile](Makefile) for build, run, debug, and objdump generation.
-  - Uses `riscv64-linux-gnu-` by default because that toolchain exists in the current environment.
-  - Build flags explicitly disable PIC/PIE so early trap vectors resolve to direct kernel addresses.
-- **Linker script**
-  - Added [kernel.ld](kernel.ld), linking the kernel at `0x80200000` to match the OpenSBI handoff documented in [docs/RISC-V 移植.md](docs/RISC-V%20移植.md).
-  - The linker script accounts for `.sdata`, `.sbss`, and aligned BSS end handling so early memory sizing is stable.
-- **Boot entry**
-  - Added [kern/arch/boot.S](kern/arch/boot.S).
-  - Sets up an early stack.
-  - Clears `.bss`.
-  - Transfers control to `kmain`.
-- **Minimal SBI support**
-  - Added [kern/arch/sbi.c](kern/arch/sbi.c).
-  - Supports legacy console putchar and SBI shutdown.
-  - Supports timer programming through the SBI TIME extension, with a fallback to the legacy set-timer call.
-- **Console backend**
-  - Added [kern/device/console.c](kern/device/console.c).
-  - Hooks kernel character output to SBI.
-- **Basic kernel formatting/printing runtime**
-  - Added [lib/print.c](lib/print.c), [lib/string.c](lib/string.c), [kern/printk.c](kern/printk.c), and related headers.
-- **Early panic path**
-  - Added [kern/panic.c](kern/panic.c).
-  - Dumps S-mode CSR state before halting.
-- **RV64/Sv39 header skeleton**
-  - Added or expanded:
-    - [include/types.h](include/types.h)
-    - [include/error.h](include/error.h)
-    - [include/queue.h](include/queue.h)
-    - [include/pmap.h](include/pmap.h)
-    - [include/env.h](include/env.h)
-    - [include/sched.h](include/sched.h)
-    - [include/arch/riscv.h](include/arch/riscv.h)
-    - [include/arch/csr.h](include/arch/csr.h)
-    - [include/arch/vm.h](include/arch/vm.h)
-    - [include/arch/trap.h](include/arch/trap.h)
-    - [include/arch/sbi.h](include/arch/sbi.h)
-- **Initial physical memory and paging implementation**
-  - Added [kern/pmap.c](kern/pmap.c).
-  - Implements:
-    - physical memory sizing for QEMU `virt`
-    - boot-time bump allocation
-    - `struct Page` metadata array
-    - free-list page allocator
-    - Sv39 page-table walk helper
-    - page insertion / lookup / removal helpers
-    - kernel root page table setup
-    - `satp` write + `sfence.vma`
-- **Initial trap and timer support**
-  - Added [kern/arch/entry.S](kern/arch/entry.S).
-  - Added [kern/arch/trap.c](kern/arch/trap.c).
-  - Implements:
-    - full general-register trap save/restore
-    - CSR save/restore for `sstatus`, `sepc`, `stval`, `scause`
-    - `stvec` installation
-    - `sie.STIE` enable
-    - timer interrupt scheduling through SBI
-    - first C-side interrupt/exception dispatch split
-- **Initial Env / scheduler skeleton**
-  - Added [kern/env.c](kern/env.c).
-  - Added [kern/sched.c](kern/sched.c).
-  - Implements:
-    - global `envs[NENV]`
-    - free env list
-    - runnable env queue
-    - env id generation
-    - simple env allocation
-    - status transitions into and out of the runnable queue
-    - a first round-robin scheduler with MOS-style slice counting
-    - timer interrupt hook into scheduling
-- **Early kernel main**
-  - Updated [kern/init.c](kern/init.c).
-  - Now initializes paging, creates a few demo runnable envs, installs the trap handler, waits for timer-driven scheduling activity, confirms rotations, and then deliberately panics.
+### 1. 独立 RV64 构建系统
+已添加：
+- [Makefile](Makefile)
 
-## Current memory-management design
+特点：
+- 默认使用 `riscv64-linux-gnu-` 工具链
+- 支持 `make`、`make run`、`make debug`、`make objdump`、`make test`
+- 显式关闭 PIC/PIE，避免早期 trap 向量地址解析出错
 
-This step intentionally uses the simplest safe bring-up strategy rather than the final full MOS memory layout.
+### 2. 链接脚本
+已添加：
+- [kernel.ld](kernel.ld)
 
-### Physical memory assumptions
+功能：
+- 将内核链接到 `0x80200000`
+- 与 OpenSBI 默认跳转地址对齐
+- 正确处理 `.text/.rodata/.data/.bss/.sdata/.sbss`
+- 保证 `kernel_end` / `bss_end` 稳定可用于早期内存分配
 
-- DRAM base is hard-coded as `0x80000000`
-- DRAM size is currently hard-coded as `2 GiB`
-- this matches the current QEMU invocation in [Makefile](Makefile)
-- device tree parsing is intentionally deferred
+### 3. 启动入口
+已添加：
+- [kern/arch/boot.S](kern/arch/boot.S)
 
-### Page metadata
+功能：
+- 设置 early stack
+- 清空 `.bss`
+- 跳转到 `kmain`
 
-- physical memory is split into 4 KiB pages
-- `pages[]` is allocated early via `boot_alloc`
-- free pages are managed through a MOS-style intrusive free list
-- `struct Page.pp_ref` is used as the basic reference count
+### 4. SBI 支持与控制台输出
+已添加/实现：
+- [kern/arch/sbi.c](kern/arch/sbi.c)
+- [kern/device/console.c](kern/device/console.c)
 
-### Page tables
+功能：
+- SBI 控制台字符输出
+- SBI shutdown
+- SBI timer 设置（优先 TIME 扩展，失败则回退 legacy 调用）
 
-- Sv39 constants and PTE encoding live in [include/arch/vm.h](include/arch/vm.h)
-- a basic 3-level walker is implemented in [kern/pmap.c](kern/pmap.c)
-- software-reserved bits for future `PTE_COW` and `PTE_LIBRARY` were defined up front
+### 5. 基础打印与 panic
+已添加：
+- [lib/print.c](lib/print.c)
+- [lib/string.c](lib/string.c)
+- [kern/printk.c](kern/printk.c)
+- [kern/panic.c](kern/panic.c)
 
-### Kernel mapping strategy
+功能：
+- `printk`
+- 基础字符串/内存函数
+- panic 时打印关键 CSR 状态
 
-For this early stage, the kernel uses a deliberately simple mapping:
+### 6. Sv39 基础内存管理
+已添加/实现：
+- [include/pmap.h](include/pmap.h)
+- [include/arch/vm.h](include/arch/vm.h)
+- [kern/pmap.c](kern/pmap.c)
 
-- a **1 GiB root-level identity mapping** covering DRAM from `0x80000000`
-- the kernel continues executing at the same virtual addresses after paging is enabled
-- this avoids a high-half transition during bring-up
+功能：
+- 物理内存硬编码探测（QEMU virt：`0x80000000` 起，`2 GiB`）
+- `pages[]` 页元数据数组
+- free-list 物理页分配器
+- `page_alloc / page_free / page_decref`
+- Sv39 三层页表 walk
+- `page_insert / page_lookup / page_remove / translate`
+- 内核根页表
+- 1GiB identity mapping
+- `satp` 开启分页
+- `sfence.vma`
+- `vm_self_test()` 基础自检
 
-## Current trap and timer design
+### 7. Trap 与时钟中断
+已添加/实现：
+- [include/arch/trap.h](include/arch/trap.h)
+- [include/arch/csr.h](include/arch/csr.h)
+- [kern/arch/entry.S](kern/arch/entry.S)
+- [kern/arch/trap.c](kern/arch/trap.c)
 
-This is the first working trap slice, not the final process-aware trap system.
+功能：
+- 进入 trap 时保存 32 个通用寄存器
+- 保存 `sstatus` / `sepc` / `stval` / `scause`
+- 使用 `sscratch` 在用户栈与内核栈之间切换
+- 安装 `stvec`
+- 打开 `sie.STIE` 和 `sstatus.SIE`
+- 定时器中断进入 S 态处理
+- 区分 interrupt / exception
+- 支持 `ecall from U`
 
-### Trap entry
+### 8. Env / 调度器骨架
+已添加/实现：
+- [include/env.h](include/env.h)
+- [include/sched.h](include/sched.h)
+- [kern/env.c](kern/env.c)
+- [kern/sched.c](kern/sched.c)
 
-[kern/arch/entry.S](kern/arch/entry.S) currently:
-
-- allocates a `Trapframe` on the kernel stack
-- saves all 32 general-purpose registers
-- records:
-  - `sstatus`
-  - `sepc`
-  - `stval`
-  - `scause`
-- calls `trap_entry_c(tf)`
-- restores register state and returns with `sret`
-
-This is enough for early kernel-only interrupt bring-up.
-
-### Trap dispatch
-
-[kern/arch/trap.c](kern/arch/trap.c) currently distinguishes:
-
-- **interrupts** vs **exceptions** using the top bit of `scause`
-- supervisor timer interrupts (`scause = interrupt | 5`)
-- placeholder user `ecall` handling
-
-Right now:
-
-- timer interrupts are serviced and re-armed
-- timer interrupts also call the first scheduler path
-- unknown interrupts panic
-- unknown exceptions print the trapframe and panic
-- user syscalls are not implemented yet
-
-### Timer handling
-
-The timer path uses SBI rather than direct machine timer access:
-
-- `trap_init()` installs `stvec`
-- enables `sie.STIE`
-- arms the first timer event with `sbi_set_timer()`
-- enables `sstatus.SIE`
-- each timer interrupt increments `timer_ticks`, re-arms the timer, and invokes scheduling
-
-This matches the documented RISC-V porting expectation much better than trying to port the MIPS CP0 clock path.
-
-## Current Env and scheduling design
-
-This is the first scheduling skeleton, not a full process switch implementation.
-
-### Env layer
-
-[kern/env.c](kern/env.c) currently provides:
-
+功能：
 - `envs[NENV]`
 - `env_free_list`
 - `env_sched_list`
 - `curenv`
-- `env_init()`
-- `env_alloc()`
-- `env_set_status()`
-- `env_create_kernel_demo()`
+- Env ID 分配
+- Env 状态切换（`ENV_FREE / ENV_RUNNABLE / ENV_NOT_RUNNABLE`）
+- 轮转调度器
+- 时间片计数（使用 `env_pri`）
+- timer interrupt 驱动调度
 
-At this stage, envs are **kernel-side scheduling objects only**:
+### 9. 最小 U 态与最小 syscall 闭环
+已添加/实现：
+- [include/syscall.h](include/syscall.h)
+- [include/arch/context.h](include/arch/context.h)
+- [kern/arch/context.S](kern/arch/context.S)
+- [kern/syscall.c](kern/syscall.c)
+- [user/demo.S](user/demo.S)
 
-- there is no user address space per env yet
-- there is no per-env `satp` switch yet
-- there is no `env_run()` that restores a user trapframe
-- there is no destruction/free path yet
+功能：
+- 为 Env 创建自己的页表根
+- 映射最小用户代码页与用户栈页
+- 初始化用户 trapframe
+- 通过 `sret` 进入 U 态
+- U 态 `ecall` 回到内核
+- 当前已支持最小 syscall：
+  - `SYS_putchar`
+  - `SYS_getenvid`
+  - `SYS_yield`
+- 两个用户 demo env（`user-a` / `user-b`）能够交替运行并输出字符
 
-### Scheduler
+### 10. 自动化测试
+已添加：
+- [test/Makefile](test/Makefile)
+- [test/run_test.sh](test/run_test.sh)
+- [test/validate_output.c](test/validate_output.c)
 
-[kern/sched.c](kern/sched.c) currently provides:
+功能：
+- 执行 `make test`
+- 自动启动 QEMU
+- 捕获串口日志到 `target/test/qemu.log`
+- 用 C 语言编写的校验器验证当前已实现功能是否正常
 
-- `sched_init()`
-- `schedule(int yield)`
-- MOS-style slice counting using `env_pri`
-- runnable queue rotation on timer/yield paths
+---
 
-Current semantics:
+## 二、当前设计说明
 
-- if the current env is runnable and a reschedule happens, it moves to the tail
-- the next runnable env is taken from the head
-- if no env is runnable, `curenv` becomes `NULL`
-- instead of entering user mode, the scheduler currently records the selected env and prints the transition
+### 1. 内存管理设计
+当前内存管理采用“先跑起来”的保守方案：
 
-This is intentional: it validates the policy layer before adding real context switch mechanics.
+- DRAM 起始地址：`0x80000000`
+- DRAM 大小：`2 GiB`
+- 不解析设备树
+- 内核根页表使用 **1GiB identity mapping** 覆盖 DRAM
+- 内核分页打开后仍然在相同虚拟地址继续执行
+- 不做高半区内核
 
-## What has been verified
+这样做的目的：
+- 降低 bring-up 复杂度
+- 先验证 Sv39 基础链路
+- 为后续 Env / U 态 / syscall 铺底
 
-The current kernel was rebuilt and booted successfully in QEMU after the Env/scheduler changes.
+### 2. Trap 设计
+当前 trap 路径已经能支持：
 
-### Verified build
+- timer interrupt
+- `ecall from U`
 
+当前仍不支持或未细化：
+- 用户态 page fault 策略
+- 内核/用户异常的细粒度恢复逻辑
+- CoW fault 处理
+
+### 3. 调度设计
+当前调度器是一个最小可运行骨架：
+
+- runnable env 放在 `env_sched_list`
+- 采用轮转调度
+- timer interrupt 或 `SYS_yield` 会触发切换
+- 每个 env 的 trapframe 当前是权威上下文
+- `env_pop_tf()` 负责切到目标 env 并进入 U 态
+
+### 4. 用户态 demo 设计
+当前不是完整用户程序体系，而是一个最小汇编 demo：
+
+- 两个 env 分别传入不同字符 `A` / `B`
+- demo 循环：
+  - `SYS_putchar`
+  - `SYS_yield`
+- 作用是验证：
+  - 进入 U 态
+  - `ecall` 回到 S 态
+  - syscall 返回
+  - scheduler 轮转
+  - timer 中断与用户态执行共存
+
+---
+
+## 三、当前已经验证通过的内容
+
+我已经实际执行并验证通过：
+
+### 构建
 ```bash
 make -C /home/jyx/ortus/RISC-V clean all
 ```
 
-### Verified run
-
+### 自动测试
 ```bash
-make -C /home/jyx/ortus/RISC-V run
+make -C /home/jyx/ortus/RISC-V test
 ```
 
-### Observed runtime behavior
+测试通过输出类似：
+```text
+PASS: validated 6952 bytes of QEMU output (A=27, B=34)
+```
 
-The kernel now prints:
+### 当前测试覆盖点
+`make test` 当前会自动验证：
 
-- boot banner
-- paging bring-up diagnostics
-- three created demo envs
-- installed trap-vector address
-- timer interrupts
-- scheduler rotations across runnable envs
-- final current-env summary
-- final panic after the scheduling test completes
+- 内核启动 banner 出现
+- Sv39 自检通过
+- `satp` 打开后内核继续存活
+- `user-a` / `user-b` 成功创建
+- 调度器进入第一个用户 env
+- 用户态成功输出 `A`
+- 用户态成功输出 `B`
+- 至少出现一次 timer interrupt
+- `A/B` 输出不是一次性的，而是能重复发生
 
-The scheduling output was explicitly observed as:
+也就是说，它已经自动覆盖了这条闭环：
 
-- `env created: id=... name=idle`
-- `env created: id=... name=worker-a`
-- `env created: id=... name=worker-b`
-- `timer interrupt #1`
-- `schedule -> env=... name=idle`
-- `timer interrupt #2`
-- `schedule -> env=... name=worker-a`
-- `timer interrupt #3`
-- `schedule -> env=... name=worker-b`
-- `timer interrupt #4`
-- `schedule -> env=... name=idle`
-- `timer interrupt #5`
-- `schedule -> env=... name=worker-a`
+**启动 → 分页 → Env → 调度 → U 态 → syscall → timer**
 
-This confirms that:
+---
 
-- early physical-memory bookkeeping works
-- paging still survives after the added env/scheduler code
-- trap entry/return still survives repeated timer interrupts
-- runnable-list rotation works
-- priority-based time-slice accounting works at the skeleton level
-- timer interrupts now drive scheduler policy rather than only proving liveness
+## 四、当前已实现功能与未实现功能的边界
 
-## Design changes vs original MOS
+### 已闭环的部分
+以下部分已经不是“骨架”，而是已经打通可运行闭环：
 
-This port is not a blind copy of the MIPS tree. Several weak spots are already being corrected.
+- 内核启动
+- SBI 输出
+- Sv39 基础分页
+- Trap 入口与返回
+- timer interrupt
+- Env 表与 runnable 调度
+- 最小 U 态
+- 最小 syscall 闭环
+- 自动化测试入口
 
-1. **Architecture split is cleaner**
-   - RISC-V-specific code lives under [include/arch/](include/arch/) and [kern/arch/](kern/arch/), instead of mixing machine assumptions into one giant MIPS-centric header.
+### 已做骨架、但还不算最终完成
+这些模块虽然已经有代码，但仍不是最终形态：
 
-2. **Memory model no longer depends on MIPS KSEG rules**
-   - This port does not reuse `KSEG0/KSEG1/ULIM/PADDR/KADDR` conventions from the MIPS tree.
-   - Physical-to-kernel conversions are explicit and based on the QEMU `virt` DRAM range.
+- 调度器
+- Trap 异常分发策略
+- Env 生命周期管理
+- 用户态 demo 运行方式
 
-3. **Trap handling no longer depends on MIPS software-managed TLB structure**
-   - The current trap path is built around `stvec`, `scause`, and `sret`, rather than MIPS exception vectors and CP0 cause decoding.
+### 尚未实现的核心任务
+仍未实现：
 
-4. **Timer handling now follows SBI expectations**
-   - The MIPS Count/Compare clock path was not ported.
-   - This kernel uses SBI timer calls, which is the correct portability layer for S-mode on OpenSBI.
-
-5. **Scheduler policy is being separated from context-switch mechanism**
-   - The current scheduler already rotates envs and tracks runs before real user-mode switching is added.
-   - This reduces bring-up risk compared with trying to land scheduling policy and full context switching at the same time.
-
-6. **String/memory helpers were adapted for RV64**
-   - The copied MOS string routines were adjusted to use 64-bit words where appropriate instead of keeping 32-bit assumptions unchanged.
-
-7. **Future CoW support was planned into the bit layout**
-   - `PTE_COW` and `PTE_LIBRARY` software bits are defined now so the later fork/IPC work can land without redoing the PTE abstraction.
-
-## What is still intentionally missing
-
-The following required stages are **still not implemented yet**:
-
-- real process context switch / return-to-user path
-- user address spaces per env
-- syscall dispatch and return semantics
-- user-mode entry
-- ELF loading
-- kernel-side CoW fork
+- 通用 ELF 加载
+- 完整 syscall 集
+  - `SYS_print_cons`
+  - `SYS_env_destroy`
+  - `SYS_mem_alloc / SYS_mem_map / SYS_mem_unmap`
+  - `SYS_exofork`
+  - `SYS_env_set_status`
+  - `SYS_panic`
+  - IPC syscalls
+  - 设备 MMIO syscalls
+- 内核态 CoW fork
 - IPC
-- MMIO access controls for virtio
-- filesystem integration
-- final user/kernel virtual memory layout compatible with full MOS userland
+- 文件系统
+- virtio / MMIO 支持
+- 完整 MOS 用户态运行时
 
-Also note:
+---
 
-- kernel permissions are still coarse because the current root mapping is a 1 GiB identity leaf for bring-up simplicity
-- device tree parsing is still omitted
-- there is no high-half kernel yet
-- exceptions still mostly panic rather than applying MOS process-level policy
-- the scheduler currently proves selection/rotation logic, but not yet full architectural context switching
+## 五、如何使用
 
-## Build and run
-
-### Build
-
+### 1. 编译
 ```bash
 make
 ```
 
-### Run
-
+### 2. 直接运行
 ```bash
 make run
 ```
 
-### Debug under GDB stub
+### 3. 自动测试
+```bash
+make test
+```
 
+### 4. 只构建测试工具
+```bash
+make test-build
+```
+
+### 5. 调试
 ```bash
 make debug
 ```
 
-### Produce annotated disassembly
-
+### 6. 生成反汇编
 ```bash
 make objdump
 ```
 
-## Current file map
+---
 
-Most relevant files in the current slice:
+## 六、下一步建议
+如果继续往前推进，建议优先顺序如下：
 
-- [Makefile](Makefile)
-- [kernel.ld](kernel.ld)
-- [kern/arch/boot.S](kern/arch/boot.S)
-- [kern/arch/entry.S](kern/arch/entry.S)
-- [kern/arch/sbi.c](kern/arch/sbi.c)
-- [kern/arch/trap.c](kern/arch/trap.c)
-- [kern/device/console.c](kern/device/console.c)
-- [kern/init.c](kern/init.c)
-- [kern/pmap.c](kern/pmap.c)
-- [kern/env.c](kern/env.c)
-- [kern/sched.c](kern/sched.c)
-- [kern/printk.c](kern/printk.c)
-- [kern/panic.c](kern/panic.c)
-- [lib/print.c](lib/print.c)
-- [lib/string.c](lib/string.c)
-- [include/pmap.h](include/pmap.h)
-- [include/env.h](include/env.h)
-- [include/sched.h](include/sched.h)
-- [include/arch/vm.h](include/arch/vm.h)
-- [include/arch/csr.h](include/arch/csr.h)
-- [include/arch/trap.h](include/arch/trap.h)
-- [include/arch/sbi.h](include/arch/sbi.h)
+1. 完善基础进程接口：
+   - `envid2env`
+   - `env_destroy`
+   - `env_set_status` 更完整语义
+2. 扩展内存相关 syscall：
+   - `SYS_mem_alloc`
+   - `SYS_mem_map`
+   - `SYS_mem_unmap`
+3. 加入真正 ELF 加载路径
+4. 用真实用户程序替换当前 demo
+5. 再做：
+   - CoW fork
+   - IPC
+   - MMIO / virtio
+   - 文件系统
 
-## Next recommended step
+---
 
-The next implementation step should be:
+## 七、当前结论
+目前项目已经不再是“只能打印的内核样机”，而是已经具备下面这条最关键的执行主干：
 
-1. add a real syscall dispatch path for `ecall`,
-2. define the first user-mode trapframe conventions,
-3. create a minimal user env and return into U-mode,
-4. then connect timer interrupts to a real `env_run()` / preemption path.
+**启动 → 分页 → Trap → Timer → 调度 → 进入 U 态 → `ecall` → syscall → 返回/切换**
 
-That is the smallest safe path toward the next mandatory milestone in [docs/RISC-V 移植.md](docs/RISC-V%20移植.md).
+这是后续完整 RISC-V MOS 移植最关键的一条主路径。后面的大部分工作，本质上都会建立在这条主路径之上。
