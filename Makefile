@@ -30,6 +30,8 @@ LDFLAGS := -T kernel.ld -nostdlib
 KERN_SRCS := \
 	kern/init.c \
 	kern/pmap.c \
+	kern/env.c \
+	kern/sched.c \
 	kern/arch/sbi.c \
 	kern/arch/trap.c \
 	kern/device/console.c \

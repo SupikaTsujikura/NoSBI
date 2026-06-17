@@ -2,6 +2,7 @@
 #include <arch/sbi.h>
 #include <arch/trap.h>
 #include <printk.h>
+#include <sched.h>
 
 #define TIMER_INTERVAL 1000000UL
 
@@ -21,6 +22,7 @@ static void handle_interrupt(struct Trapframe *tf) {
 		timer_ticks++;
 		printk("  timer interrupt #%lu\n", timer_ticks);
 		timer_arm_next();
+		schedule(1);
 		break;
 	default:
 		panic("unhandled interrupt scause=%016lx", tf->scause);

@@ -1,24 +1,25 @@
 # MOS on RISC-V: current porting status
 
-This directory now contains an **early C-based RV64 MOS port skeleton** that boots on QEMU `virt`, enables Sv39 paging, and has a working first-cut trap + timer interrupt path.
+This directory now contains an **early C-based RV64 MOS port skeleton** that boots on QEMU `virt`, enables Sv39 paging, handles timer interrupts, and now has a first Env/scheduler skeleton wired into those interrupts.
 
 ## What has been implemented
 
-This repository now covers three early milestones from [docs/RISC-V 移植.md](docs/RISC-V%20移植.md):
+This repository now covers four early milestones from [docs/RISC-V 移植.md](docs/RISC-V%20移植.md):
 
 1. **kernel boot + character output**
 2. **initial Sv39 memory-management bring-up**
 3. **initial trap entry + timer interrupt handling**
+4. **initial Env table + runnable scheduling skeleton**
 
 Implemented pieces:
 
 - **Standalone RV64 build system**
   - Added [Makefile](Makefile) for build, run, debug, and objdump generation.
   - Uses `riscv64-linux-gnu-` by default because that toolchain exists in the current environment.
-  - Build flags now explicitly disable PIC/PIE so early trap vectors resolve to direct kernel addresses.
+  - Build flags explicitly disable PIC/PIE so early trap vectors resolve to direct kernel addresses.
 - **Linker script**
   - Added [kernel.ld](kernel.ld), linking the kernel at `0x80200000` to match the OpenSBI handoff documented in [docs/RISC-V 移植.md](docs/RISC-V%20移植.md).
-  - The linker script now also accounts for `.sdata`, `.sbss`, and aligned BSS end handling so early memory sizing is stable.
+  - The linker script accounts for `.sdata`, `.sbss`, and aligned BSS end handling so early memory sizing is stable.
 - **Boot entry**
   - Added [kern/arch/boot.S](kern/arch/boot.S).
   - Sets up an early stack.
@@ -27,7 +28,7 @@ Implemented pieces:
 - **Minimal SBI support**
   - Added [kern/arch/sbi.c](kern/arch/sbi.c).
   - Supports legacy console putchar and SBI shutdown.
-  - Now also supports timer programming through the SBI TIME extension, with a fallback to the legacy set-timer call.
+  - Supports timer programming through the SBI TIME extension, with a fallback to the legacy set-timer call.
 - **Console backend**
   - Added [kern/device/console.c](kern/device/console.c).
   - Hooks kernel character output to SBI.
@@ -42,6 +43,8 @@ Implemented pieces:
     - [include/error.h](include/error.h)
     - [include/queue.h](include/queue.h)
     - [include/pmap.h](include/pmap.h)
+    - [include/env.h](include/env.h)
+    - [include/sched.h](include/sched.h)
     - [include/arch/riscv.h](include/arch/riscv.h)
     - [include/arch/csr.h](include/arch/csr.h)
     - [include/arch/vm.h](include/arch/vm.h)
@@ -68,9 +71,21 @@ Implemented pieces:
     - `sie.STIE` enable
     - timer interrupt scheduling through SBI
     - first C-side interrupt/exception dispatch split
+- **Initial Env / scheduler skeleton**
+  - Added [kern/env.c](kern/env.c).
+  - Added [kern/sched.c](kern/sched.c).
+  - Implements:
+    - global `envs[NENV]`
+    - free env list
+    - runnable env queue
+    - env id generation
+    - simple env allocation
+    - status transitions into and out of the runnable queue
+    - a first round-robin scheduler with MOS-style slice counting
+    - timer interrupt hook into scheduling
 - **Early kernel main**
   - Updated [kern/init.c](kern/init.c).
-  - Now initializes paging, installs the trap handler, waits for 3 timer interrupts, confirms they arrived, and then deliberately panics.
+  - Now initializes paging, creates a few demo runnable envs, installs the trap handler, waits for timer-driven scheduling activity, confirms rotations, and then deliberately panics.
 
 ## Current memory-management design
 
@@ -104,14 +119,6 @@ For this early stage, the kernel uses a deliberately simple mapping:
 - the kernel continues executing at the same virtual addresses after paging is enabled
 - this avoids a high-half transition during bring-up
 
-This is intentionally conservative. It is enough to:
-
-- allocate memory
-- walk page tables
-- install one test mapping
-- enable Sv39 cleanly
-- keep the kernel alive after the `satp` switch
-
 ## Current trap and timer design
 
 This is the first working trap slice, not the final process-aware trap system.
@@ -143,6 +150,7 @@ This is enough for early kernel-only interrupt bring-up.
 Right now:
 
 - timer interrupts are serviced and re-armed
+- timer interrupts also call the first scheduler path
 - unknown interrupts panic
 - unknown exceptions print the trapframe and panic
 - user syscalls are not implemented yet
@@ -155,13 +163,55 @@ The timer path uses SBI rather than direct machine timer access:
 - enables `sie.STIE`
 - arms the first timer event with `sbi_set_timer()`
 - enables `sstatus.SIE`
-- each timer interrupt increments `timer_ticks` and arms the next interrupt
+- each timer interrupt increments `timer_ticks`, re-arms the timer, and invokes scheduling
 
 This matches the documented RISC-V porting expectation much better than trying to port the MIPS CP0 clock path.
 
+## Current Env and scheduling design
+
+This is the first scheduling skeleton, not a full process switch implementation.
+
+### Env layer
+
+[kern/env.c](kern/env.c) currently provides:
+
+- `envs[NENV]`
+- `env_free_list`
+- `env_sched_list`
+- `curenv`
+- `env_init()`
+- `env_alloc()`
+- `env_set_status()`
+- `env_create_kernel_demo()`
+
+At this stage, envs are **kernel-side scheduling objects only**:
+
+- there is no user address space per env yet
+- there is no per-env `satp` switch yet
+- there is no `env_run()` that restores a user trapframe
+- there is no destruction/free path yet
+
+### Scheduler
+
+[kern/sched.c](kern/sched.c) currently provides:
+
+- `sched_init()`
+- `schedule(int yield)`
+- MOS-style slice counting using `env_pri`
+- runnable queue rotation on timer/yield paths
+
+Current semantics:
+
+- if the current env is runnable and a reschedule happens, it moves to the tail
+- the next runnable env is taken from the head
+- if no env is runnable, `curenv` becomes `NULL`
+- instead of entering user mode, the scheduler currently records the selected env and prints the transition
+
+This is intentional: it validates the policy layer before adding real context switch mechanics.
+
 ## What has been verified
 
-The current kernel was rebuilt and booted successfully in QEMU after the trap/timer changes.
+The current kernel was rebuilt and booted successfully in QEMU after the Env/scheduler changes.
 
 ### Verified build
 
@@ -180,35 +230,38 @@ make -C /home/jyx/ortus/RISC-V run
 The kernel now prints:
 
 - boot banner
-- `sstatus`
-- `stvec`
-- detected page count (`npage`)
-- maximum physical address (`maxpa`)
-- `pages[]` address
-- kernel page-table root address
-- `vm self-test passed`
-- `satp enabled, kernel still alive`
+- paging bring-up diagnostics
+- three created demo envs
 - installed trap-vector address
-- three observed timer interrupts
-- final panic after the interrupt test completes
+- timer interrupts
+- scheduler rotations across runnable envs
+- final current-env summary
+- final panic after the scheduling test completes
 
-The timer output was explicitly observed as:
+The scheduling output was explicitly observed as:
 
+- `env created: id=... name=idle`
+- `env created: id=... name=worker-a`
+- `env created: id=... name=worker-b`
 - `timer interrupt #1`
+- `schedule -> env=... name=idle`
 - `timer interrupt #2`
+- `schedule -> env=... name=worker-a`
 - `timer interrupt #3`
+- `schedule -> env=... name=worker-b`
+- `timer interrupt #4`
+- `schedule -> env=... name=idle`
+- `timer interrupt #5`
+- `schedule -> env=... name=worker-a`
 
 This confirms that:
 
 - early physical-memory bookkeeping works
-- boot allocator works
-- free-list allocator works at least for basic allocation
-- Sv39 page-table walk and leaf insertion work for the current self-test
-- `satp` switching does not immediately kill the kernel
-- `sfence.vma` path is wired in
-- `stvec` points to the intended trap entry
-- supervisor timer interrupts reach S-mode correctly
-- trap save/restore is good enough for repeated timer interrupts and return-to-kernel execution
+- paging still survives after the added env/scheduler code
+- trap entry/return still survives repeated timer interrupts
+- runnable-list rotation works
+- priority-based time-slice accounting works at the skeleton level
+- timer interrupts now drive scheduler policy rather than only proving liveness
 
 ## Design changes vs original MOS
 
@@ -228,34 +281,38 @@ This port is not a blind copy of the MIPS tree. Several weak spots are already b
    - The MIPS Count/Compare clock path was not ported.
    - This kernel uses SBI timer calls, which is the correct portability layer for S-mode on OpenSBI.
 
-5. **String/memory helpers were adapted for RV64**
+5. **Scheduler policy is being separated from context-switch mechanism**
+   - The current scheduler already rotates envs and tracks runs before real user-mode switching is added.
+   - This reduces bring-up risk compared with trying to land scheduling policy and full context switching at the same time.
+
+6. **String/memory helpers were adapted for RV64**
    - The copied MOS string routines were adjusted to use 64-bit words where appropriate instead of keeping 32-bit assumptions unchanged.
 
-6. **Future CoW support was planned into the bit layout**
+7. **Future CoW support was planned into the bit layout**
    - `PTE_COW` and `PTE_LIBRARY` software bits are defined now so the later fork/IPC work can land without redoing the PTE abstraction.
 
 ## What is still intentionally missing
 
 The following required stages are **still not implemented yet**:
 
-- user/kernel trap-origin policy beyond panic-level diagnostics
-- process/env management
-- scheduler
+- real process context switch / return-to-user path
+- user address spaces per env
 - syscall dispatch and return semantics
 - user-mode entry
+- ELF loading
 - kernel-side CoW fork
 - IPC
 - MMIO access controls for virtio
 - filesystem integration
-- a final user/kernel virtual memory layout compatible with full MOS userland
+- final user/kernel virtual memory layout compatible with full MOS userland
 
 Also note:
 
 - kernel permissions are still coarse because the current root mapping is a 1 GiB identity leaf for bring-up simplicity
 - device tree parsing is still omitted
 - there is no high-half kernel yet
-- timer interrupts currently prove trap liveness, but are not yet connected to scheduling
 - exceptions still mostly panic rather than applying MOS process-level policy
+- the scheduler currently proves selection/rotation logic, but not yet full architectural context switching
 
 ## Build and run
 
@@ -296,11 +353,15 @@ Most relevant files in the current slice:
 - [kern/device/console.c](kern/device/console.c)
 - [kern/init.c](kern/init.c)
 - [kern/pmap.c](kern/pmap.c)
+- [kern/env.c](kern/env.c)
+- [kern/sched.c](kern/sched.c)
 - [kern/printk.c](kern/printk.c)
 - [kern/panic.c](kern/panic.c)
 - [lib/print.c](lib/print.c)
 - [lib/string.c](lib/string.c)
 - [include/pmap.h](include/pmap.h)
+- [include/env.h](include/env.h)
+- [include/sched.h](include/sched.h)
 - [include/arch/vm.h](include/arch/vm.h)
 - [include/arch/csr.h](include/arch/csr.h)
 - [include/arch/trap.h](include/arch/trap.h)
@@ -310,9 +371,9 @@ Most relevant files in the current slice:
 
 The next implementation step should be:
 
-1. teach traps to distinguish kernel-only faults from future user faults more cleanly,
-2. introduce `Env` state and a first scheduler skeleton,
-3. wire timer interrupts into scheduling rather than only counting them,
-4. then add syscall entry and a first U-mode test program.
+1. add a real syscall dispatch path for `ecall`,
+2. define the first user-mode trapframe conventions,
+3. create a minimal user env and return into U-mode,
+4. then connect timer interrupts to a real `env_run()` / preemption path.
 
 That is the smallest safe path toward the next mandatory milestone in [docs/RISC-V 移植.md](docs/RISC-V%20移植.md).

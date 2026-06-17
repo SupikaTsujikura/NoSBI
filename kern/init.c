@@ -1,7 +1,9 @@
 #include <arch/csr.h>
 #include <arch/trap.h>
+#include <env.h>
 #include <pmap.h>
 #include <printk.h>
+#include <sched.h>
 
 void kmain(void) {
 	csr_clear_sstatus(SSTATUS_SIE);
@@ -21,12 +23,22 @@ void kmain(void) {
 	vm_enable();
 	printk("  satp enabled, kernel still alive\n");
 
+	env_init();
+	sched_init();
+	env_create_kernel_demo("idle", 1);
+	env_create_kernel_demo("worker-a", 2);
+	env_create_kernel_demo("worker-b", 1);
+
 	trap_init();
 	printk("  trap handler installed at 0x%016lx\n", csr_read_stvec());
-	printk("  waiting for 3 timer interrupts...\n");
-	while (timer_ticks < 3) {
+	printk("  waiting for 5 timer interrupts and scheduler rotations...\n");
+	while (timer_ticks < 5) {
 		wfi();
 	}
 	printk("  observed %lu timer interrupts\n", timer_ticks);
-	panic("kernel bootstrap complete; next step is env and syscall bring-up");
+	if (curenv != NULL) {
+		printk("  current env after scheduling: 0x%lx (%s), runs=%lu\n", curenv->env_id,
+		       curenv->env_name, curenv->env_runs);
+	}
+	panic("kernel bootstrap complete; next step is syscall and user-mode bring-up");
 }
