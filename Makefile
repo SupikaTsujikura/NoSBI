@@ -8,9 +8,11 @@ OBJCOPY := $(CROSS_COMPILE)objcopy
 OBJDUMP := $(CROSS_COMPILE)objdump
 QEMU    ?= qemu-system-riscv64
 
-TARGET_DIR := target
+TARGET_DIR ?= target
 KERNEL_ELF := $(TARGET_DIR)/mos-riscv.elf
 KERNEL_BIN := $(TARGET_DIR)/mos-riscv.bin
+
+EXTRA_CFLAGS ?=
 
 CFLAGS := \
 	-march=rv64imafdch \
@@ -23,7 +25,8 @@ CFLAGS := \
 	-fno-pic \
 	-fno-pie \
 	-Wall -Wextra -Werror -ggdb -O2 \
-	-Iinclude
+	-Iinclude \
+	$(EXTRA_CFLAGS)
 
 LDFLAGS := -T kernel.ld -nostdlib
 
@@ -73,12 +76,13 @@ debug: $(KERNEL_ELF)
 objdump: $(KERNEL_ELF)
 	$(OBJDUMP) -aldS $(KERNEL_ELF) > $(KERNEL_ELF).objdump
 
-test-build: $(KERNEL_ELF)
-	$(MAKE) --directory=test ROOT_DIR=$(CURDIR) all
+test-build:
+	$(MAKE) clean all TARGET_DIR=target-test EXTRA_CFLAGS=-DMOS_TEST_MODE
 
-test: $(KERNEL_ELF)
-	$(MAKE) --directory=test ROOT_DIR=$(CURDIR) KERNEL_ELF=$(CURDIR)/$(KERNEL_ELF) test
+test:
+	$(MAKE) clean all TARGET_DIR=target-test EXTRA_CFLAGS=-DMOS_TEST_MODE
+	$(MAKE) --directory=test ROOT_DIR=$(CURDIR) KERNEL_ELF=$(CURDIR)/target-test/mos-riscv.elf test
 
 clean:
-	rm -rf $(TARGET_DIR) $(KERN_OBJS)
+	rm -rf target target-test $(KERN_OBJS)
 	$(MAKE) --directory=test ROOT_DIR=$(CURDIR) clean

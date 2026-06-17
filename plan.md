@@ -101,39 +101,22 @@
 
 ---
 
-### 5. 最小 U 态 + 最小 syscall 闭环
+### 6. 自动化测试闭环
 已实现：
-- 为 Env 创建独立页表根
-- 为 demo 用户程序映射用户代码页
-- 为 demo 用户程序映射用户栈页
-- 初始化用户 trapframe
-- `env_pop_tf()` 切换 `satp` 并 `sret` 进入 U 态
-- U 态 `ecall` 回到内核
-- 最小 syscall 分发：
-  - `SYS_putchar`
-  - `SYS_getenvid`
-  - `SYS_yield`
-- 两个 demo 用户 env（`user-a` / `user-b`）轮流运行
-- 用户态输出字符 `A/B`
-- `SYS_yield` 触发切换
-- timer interrupt 在用户运行期间仍然可以抢占并触发调度
+- `make test`
+- QEMU 有界运行脚本
+- 宿主机侧 C 语言日志校验器
+- 自动检查启动、分页、Env、调度、U 态、最小 syscall、timer interrupt 的关键输出
+- 针对 `\r`、`\0` 和 QEMU 缓冲问题做了稳健处理
+- 使用 QEMU `-serial file:...` 直接写日志，规避某些环境下 shell 重定向导致空日志的问题
 
 关键文件：
-- `kern/arch/context.S`
-- `kern/env.c`
-- `kern/syscall.c`
-- `user/demo.S`
-- `kern/arch/trap.c`
-- `kern/sched.c`
+- `test/Makefile`
+- `test/run_test.sh`
+- `test/validate_output.c`
+- `Makefile`
 
-当前状态：**最小闭环已完成并验证通过**
-
-说明：
-- 当前最小 syscall/U 态闭环已经证明：
-  - 能进入 U 态
-  - 能从 U 态陷入 S 态
-  - 能从 syscall 返回并继续调度
-  - 能在多个用户 env 间轮转
+当前状态：**已闭环、已验证通过**
 
 ---
 

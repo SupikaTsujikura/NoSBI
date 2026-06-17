@@ -222,7 +222,7 @@ make -C /home/jyx/ortus/RISC-V test
 
 测试通过输出类似：
 ```text
-PASS: validated 6952 bytes of QEMU output (A=27, B=34)
+PASS: validated 8432 bytes of QEMU output (A=27, B=34)
 ```
 
 ### 当前测试覆盖点
@@ -304,6 +304,18 @@ make run
 ```bash
 make test
 ```
+
+说明：
+- 该命令会先构建内核，再构建 `test/validate_output.c` 这个宿主机侧校验程序。
+- 测试脚本 [test/run_test.sh](test/run_test.sh) 现在直接使用 QEMU 的 `-serial file:...` 把串口输出写入 `target/test/qemu.log`，避免某些环境下 shell 重定向/缓冲导致日志为空。
+- QEMU 输出会保存到 `target/test/qemu.log`。
+- 校验器会先清洗日志中的 `\r`、`\0` 等控制字符，再检查关键输出是否按顺序出现。
+
+如果测试失败，建议优先检查：
+- `target/test/qemu.log` 是否为空
+- 本机是否安装了 `qemu-system-riscv64`
+- 本机是否存在 `riscv64-linux-gnu-` 工具链
+- 日志中是否确实出现了内核 banner、`A/B` 用户输出、timer interrupt
 
 ### 4. 只构建测试工具
 ```bash

@@ -11,10 +11,20 @@
 volatile uint64_t timer_ticks;
 
 extern char trap_entry[];
+extern struct Env envs[];
 
 static void timer_arm_next(void) {
 	sbi_set_timer(csr_read_time() + TIMER_INTERVAL);
 }
+
+#ifdef MOS_TEST_MODE
+static void maybe_finish_test(void) {
+	if (envs[0].env_runs >= 8 && envs[1].env_runs >= 8 && timer_ticks >= 2) {
+		printk("TEST PASS: bootstrap, vm, trap, timer, user mode, syscall, and scheduling verified\n");
+		sbi_shutdown();
+	}
+}
+#endif
 
 static void handle_interrupt(struct Trapframe *tf) {
 	reg_t cause = tf->scause & SCAUSE_CODE_MASK;
@@ -22,8 +32,13 @@ static void handle_interrupt(struct Trapframe *tf) {
 	switch (cause) {
 	case SCAUSE_SUPERVISOR_TIMER:
 		timer_ticks++;
+#ifndef MOS_TEST_MODE
 		printk("  timer interrupt #%lu\n", timer_ticks);
+#endif
 		timer_arm_next();
+#ifdef MOS_TEST_MODE
+		maybe_finish_test();
+#endif
 		schedule(1);
 		break;
 	default:

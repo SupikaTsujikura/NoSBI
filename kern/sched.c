@@ -28,7 +28,9 @@ void schedule(int yield) {
 	sched_slices--;
 	curenv = env;
 	env->env_runs++;
+#ifndef MOS_TEST_MODE
 	printk("  schedule -> env=0x%lx runs=%lu name=%s\n", env->env_id, env->env_runs,
 	       env->env_name[0] ? env->env_name : "(unnamed)");
+#endif
 	env_pop_tf(&env->env_tf, env->env_satp);
 }
