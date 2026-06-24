@@ -1,6 +1,7 @@
 #include <arch/csr.h>
 #include <arch/vm.h>
 #include <block.h>
+#include <plic.h>
 #include <printk.h>
 #include <string.h>
 #include <types.h>
@@ -38,11 +39,13 @@
 #define VIRTQ_DESC_F_WRITE 2
 
 #define VIRTIO_BLK_T_IN 0
+#define VIRTIO_BLK_T_OUT 1
 #define VIRTQ_SIZE      8
 #define VIRTIO_MAGIC    0x74726976
 #define VIRTIO_BLK_ID   2
 #define VIRTIO_MMIO_STRIDE 0x1000UL
 #define VIRTIO_MMIO_SLOTS  8
+#define VIRTIO_IRQ_WAIT_TICKS 1000000UL
 
 struct VirtqDesc {
 	u64 addr;
@@ -81,7 +84,12 @@ static volatile struct VirtqUsed *virtq_used;
 static struct VirtioBlkReq blk_req __attribute__((aligned(16)));
 static volatile u8 blk_status __attribute__((aligned(1)));
 static uintptr_t virtio_base;
+static u32 virtio_irq;
 static int blk_ready;
+static int blk_irq_enabled;
+static int blk_irq_wait_enabled;
+static volatile int blk_done;
+static volatile u32 blk_interrupt_count;
 static u16 used_seen;
 
 static volatile u32 *mmio_reg(u32 offset) {
@@ -114,6 +122,7 @@ void block_init(void) {
 		version = mmio_read(VIRTIO_MMIO_VERSION);
 		device = mmio_read(VIRTIO_MMIO_DEVICE_ID);
 		if (magic == VIRTIO_MAGIC && device == VIRTIO_BLK_ID) {
+			virtio_irq = PLIC_IRQ_VIRTIO0 + (u32)i;
 			break;
 		}
 	}
@@ -172,26 +181,69 @@ void block_init(void) {
 	mmio_write(VIRTIO_MMIO_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
 	                                VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
 	blk_ready = 1;
-	printk("  virtio-blk ready base=0x%lx version=%u\n", virtio_base, version);
+	if (virtio_irq != 0) {
+		plic_enable_irq(virtio_irq);
+		blk_irq_enabled = 1;
+	}
+	printk("  virtio-blk ready base=0x%lx irq=%u version=%u\n", virtio_base,
+	       virtio_irq, version);
 }
 
 int block_available(void) {
 	return blk_ready;
 }
 
-int block_read_sector(u64 sector, void *buf) {
+u32 block_irq(void) {
+	return virtio_irq;
+}
+
+int block_interrupts_enabled(void) {
+	return blk_ready && blk_irq_enabled;
+}
+
+void block_enable_irq_wait(void) {
+	if (block_interrupts_enabled()) {
+		blk_irq_wait_enabled = 1;
+	}
+}
+
+void block_handle_irq(void) {
+	u32 status;
+
+	if (!blk_ready) {
+		return;
+	}
+	status = mmio_read(VIRTIO_MMIO_INTERRUPT_STATUS);
+	if (status != 0) {
+		mmio_write(VIRTIO_MMIO_INTERRUPT_ACK, status);
+		blk_interrupt_count++;
+		blk_done = 1;
+	}
+}
+
+static int block_rw_sector(u32 type, u64 sector, void *buf) {
 	reg_t sstatus;
+	reg_t sie;
+	reg_t deadline;
 	int ret;
+	int use_irq;
 
 	if (!blk_ready || buf == NULL) {
 		return -1;
 	}
-	sstatus = csr_read_clear_sstatus(SSTATUS_SIE);
+	sstatus = csr_read_sstatus();
+	sie = csr_read_sie();
+	(void)blk_irq_wait_enabled;
+	use_irq = 0;
+	if (!use_irq) {
+		(void)csr_read_clear_sstatus(SSTATUS_SIE);
+	}
 
-	blk_req.type = VIRTIO_BLK_T_IN;
+	blk_req.type = type;
 	blk_req.reserved = 0;
 	blk_req.sector = sector;
 	blk_status = 0xff;
+	blk_done = 0;
 
 	virtq_desc[0].addr = (u64)(uintptr_t)&blk_req;
 	virtq_desc[0].len = sizeof(blk_req);
@@ -200,7 +252,10 @@ int block_read_sector(u64 sector, void *buf) {
 
 	virtq_desc[1].addr = (u64)(uintptr_t)buf;
 	virtq_desc[1].len = BLOCK_SECTOR_SIZE;
-	virtq_desc[1].flags = VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT;
+	virtq_desc[1].flags = VIRTQ_DESC_F_NEXT;
+	if (type == VIRTIO_BLK_T_IN) {
+		virtq_desc[1].flags |= VIRTQ_DESC_F_WRITE;
+	}
 	virtq_desc[1].next = 2;
 
 	virtq_desc[2].addr = (u64)(uintptr_t)&blk_status;
@@ -214,18 +269,37 @@ int block_read_sector(u64 sector, void *buf) {
 	mem_barrier();
 
 	mmio_write(VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+	if (use_irq) {
+		deadline = csr_read_time() + VIRTIO_IRQ_WAIT_TICKS;
+		csr_write_sie(SIE_SEIE);
+		csr_set_sstatus(SSTATUS_SIE);
+		while (!blk_done && used_seen == virtq_used->idx &&
+		       csr_read_time() < deadline) {
+			mem_barrier();
+		}
+		csr_write_sie(sie);
+		if ((sstatus & SSTATUS_SIE) == 0) {
+			csr_clear_sstatus(SSTATUS_SIE);
+		}
+	}
 	while (used_seen == virtq_used->idx) {
 		mem_barrier();
 	}
 	mem_barrier();
 	used_seen++;
 
-	if (mmio_read(VIRTIO_MMIO_INTERRUPT_STATUS) != 0) {
-		mmio_write(VIRTIO_MMIO_INTERRUPT_ACK, mmio_read(VIRTIO_MMIO_INTERRUPT_STATUS));
-	}
+	block_handle_irq();
 	ret = blk_status == 0 ? 0 : -1;
-	if ((sstatus & SSTATUS_SIE) != 0) {
+	if (!use_irq && (sstatus & SSTATUS_SIE) != 0) {
 		csr_set_sstatus(SSTATUS_SIE);
 	}
 	return ret;
+}
+
+int block_read_sector(u64 sector, void *buf) {
+	return block_rw_sector(VIRTIO_BLK_T_IN, sector, buf);
+}
+
+int block_write_sector(u64 sector, const void *buf) {
+	return block_rw_sector(VIRTIO_BLK_T_OUT, sector, (void *)buf);
 }

@@ -11,6 +11,7 @@ struct sbiret {
 struct sbiret sbi_ecall(long ext, long fid, long arg0, long arg1, long arg2, long arg3,
 			 long arg4, long arg5);
 void sbi_console_putchar(int ch);
+int sbi_console_getchar(void);
 void sbi_set_timer(uint64_t next);
 void sbi_shutdown(void) __attribute__((noreturn));
 

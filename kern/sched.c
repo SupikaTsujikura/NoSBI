@@ -4,6 +4,8 @@
 #include <sched.h>
 #include <syscall.h>
 
+#define SCHED_DEBUG 0
+
 void sched_init(void) {
 }
 
@@ -36,7 +38,7 @@ void schedule(int yield) {
 	}
 	curenv = env;
 	env->env_runs++;
-#ifndef MOS_TEST_MODE
+#if SCHED_DEBUG
 	printk("  schedule -> env=0x%lx runs=%lu ticks_left=%u name=%s\n",
 	       env->env_id, env->env_runs, env->env_ticks_left,
 	       env->env_name[0] ? env->env_name : "(unnamed)");

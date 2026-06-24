@@ -1,14 +1,17 @@
 #include <arch/csr.h>
 #include <arch/sbi.h>
 #include <arch/trap.h>
+#include <block.h>
 #include <error.h>
 #include <env.h>
 #include <pmap.h>
+#include <plic.h>
 #include <printk.h>
 #include <sched.h>
 #include <syscall.h>
 
 #define TIMER_INTERVAL 1000000UL
+#define TIMER_DEBUG 0
 
 volatile uint64_t timer_ticks;
 
@@ -34,7 +37,7 @@ static void handle_interrupt(struct Trapframe *tf) {
 	switch (cause) {
 	case SCAUSE_SUPERVISOR_TIMER:
 		timer_ticks++;
-#ifndef MOS_TEST_MODE
+#if TIMER_DEBUG
 		printk("  timer interrupt #%lu\n", timer_ticks);
 #endif
 		timer_arm_next();
@@ -42,6 +45,19 @@ static void handle_interrupt(struct Trapframe *tf) {
 		maybe_finish_test();
 #endif
 		sched_tick();
+		break;
+	case SCAUSE_SUPERVISOR_EXTERNAL:
+		for (;;) {
+			u32 irq = plic_claim();
+
+			if (irq == 0) {
+				break;
+			}
+			if (irq == block_irq()) {
+				block_handle_irq();
+			}
+			plic_complete(irq);
+		}
 		break;
 	default:
 		panic("unhandled interrupt scause=%016lx", tf->scause);
@@ -53,8 +69,11 @@ static int copy_to_curenv_user(uint64_t va, const void *src, size_t len) {
 
 	for (size_t i = 0; i < len; i++) {
 		paddr_t pa;
+		pte_t *pte;
 
-		if (curenv == NULL || translate(curenv->env_pgtable, va + i, &pa, NULL) < 0) {
+		if (curenv == NULL || va + i >= USER_TOP ||
+		    translate(curenv->env_pgtable, va + i, &pa, &pte) < 0 ||
+		    pte == NULL || ((*pte & (PTE_U | PTE_W)) != (PTE_U | PTE_W))) {
 			return -E_INVAL;
 		}
 		*(char *)(uintptr_t)pa = in[i];
@@ -121,7 +140,8 @@ static void handle_exception(struct Trapframe *tf) {
 
 void trap_init(void) {
 	csr_write_stvec((reg_t)(uintptr_t)trap_entry);
-	csr_write_sie(csr_read_sie() | SIE_STIE);
+	csr_write_sie(csr_read_sie() | SIE_STIE | SIE_SEIE);
+	block_enable_irq_wait();
 	timer_ticks = 0;
 	timer_arm_next();
 	csr_set_sstatus(SSTATUS_SIE);
@@ -129,6 +149,14 @@ void trap_init(void) {
 
 void kernel_trap_panic(reg_t scause, reg_t sepc, reg_t stval) {
 	panic("kernel trap scause=%016lx sepc=%016lx stval=%016lx", scause, sepc, stval);
+}
+
+void kernel_trap_entry_c(struct Trapframe *tf) {
+	if (tf->scause & SCAUSE_INTERRUPT) {
+		handle_interrupt(tf);
+		return;
+	}
+	kernel_trap_panic(tf->scause, tf->sepc, tf->stval);
 }
 
 void trap_entry_c(struct Trapframe *tf) {

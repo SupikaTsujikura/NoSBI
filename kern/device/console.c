@@ -9,7 +9,9 @@ void printcharc(char ch) {
 }
 
 int scancharc(void) {
-	return 0;
+	int ch = sbi_console_getchar();
+
+	return ch < 0 ? 0 : ch;
 }
 
 void halt(void) {

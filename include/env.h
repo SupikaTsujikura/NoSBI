@@ -69,10 +69,7 @@ struct Env {
 	char env_name[16];
 	struct {
 		int used;
-		int type;
-		int fileid;
-		int pipeid;
-		size_t offset;
+		int openid;
 	} env_fds[FS_MAX_FD];
 };
 

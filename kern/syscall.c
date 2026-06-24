@@ -1,4 +1,5 @@
 #include <arch/csr.h>
+#include <block.h>
 #include <env.h>
 #include <error.h>
 #include <fs.h>
@@ -18,7 +19,17 @@ struct KernelPipe {
 	uint8_t buf[FS_PIPE_CAPACITY];
 };
 
+struct KernelOpenFile {
+	int used;
+	int ref;
+	int type;
+	int fileid;
+	int pipeid;
+	size_t offset;
+};
+
 static struct KernelPipe pipes[FS_MAX_PIPES];
+static struct KernelOpenFile open_files[FS_MAX_OPEN_FILES];
 
 static int user_va_ok(vaddr_t va) {
 	return va >= UTEMP && va < USER_MAP_TOP && (va & (PAGE_SIZE - 1)) == 0;
@@ -53,8 +64,11 @@ static uint64_t pte_to_user_perm(pte_t pte) {
 
 static int copy_user_byte(uint64_t va, char *out) {
 	paddr_t pa;
+	pte_t *pte;
 
-	if (curenv == NULL || out == NULL || translate(curenv->env_pgtable, va, &pa, NULL) < 0) {
+	if (curenv == NULL || out == NULL || va >= USER_TOP ||
+	    translate(curenv->env_pgtable, va, &pa, &pte) < 0 ||
+	    pte == NULL || ((*pte & (PTE_U | PTE_R)) != (PTE_U | PTE_R))) {
 		return -E_INVAL;
 	}
 	*out = *(char *)(uintptr_t)pa;
@@ -75,8 +89,11 @@ static int copy_to_user(uint64_t va, const void *src, size_t len) {
 
 	for (size_t i = 0; i < len; i++) {
 		paddr_t pa;
+		pte_t *pte;
 
-		if (curenv == NULL || translate(curenv->env_pgtable, va + i, &pa, NULL) < 0) {
+		if (curenv == NULL || va + i >= USER_TOP ||
+		    translate(curenv->env_pgtable, va + i, &pa, &pte) < 0 ||
+		    pte == NULL || ((*pte & (PTE_U | PTE_W)) != (PTE_U | PTE_W))) {
 			return -E_INVAL;
 		}
 		*(char *)(uintptr_t)pa = in[i];
@@ -112,15 +129,31 @@ static int fd_alloc(struct Env *env) {
 	return -E_NO_MEM;
 }
 
-static void pipe_incref(int pipeid, int type) {
-	if (pipeid < 0 || pipeid >= FS_MAX_PIPES || !pipes[pipeid].used) {
-		return;
+static struct KernelOpenFile *fd_file(struct Env *env, uint64_t fd) {
+	int openid;
+
+	if (env == NULL || fd >= FS_MAX_FD || !env->env_fds[fd].used) {
+		return NULL;
 	}
-	if (type == FD_PIPE_READ) {
-		pipes[pipeid].readers++;
-	} else if (type == FD_PIPE_WRITE) {
-		pipes[pipeid].writers++;
+	openid = env->env_fds[fd].openid;
+	if (openid < 0 || openid >= FS_MAX_OPEN_FILES || !open_files[openid].used) {
+		return NULL;
 	}
+	return &open_files[openid];
+}
+
+static int ofile_alloc(void) {
+	for (int i = 0; i < FS_MAX_OPEN_FILES; i++) {
+		if (!open_files[i].used) {
+			memset(&open_files[i], 0, sizeof(open_files[i]));
+			open_files[i].used = 1;
+			open_files[i].ref = 1;
+			open_files[i].fileid = -1;
+			open_files[i].pipeid = -1;
+			return i;
+		}
+	}
+	return -E_NO_MEM;
 }
 
 static void pipe_decref(int pipeid, int type) {
@@ -137,13 +170,29 @@ static void pipe_decref(int pipeid, int type) {
 	}
 }
 
+static void ofile_decref(int openid) {
+	struct KernelOpenFile *file;
+
+	if (openid < 0 || openid >= FS_MAX_OPEN_FILES || !open_files[openid].used) {
+		return;
+	}
+	file = &open_files[openid];
+	if (file->ref > 0) {
+		file->ref--;
+	}
+	if (file->ref == 0) {
+		if (file->type == FD_PIPE_READ || file->type == FD_PIPE_WRITE) {
+			pipe_decref(file->pipeid, file->type);
+		}
+		memset(file, 0, sizeof(*file));
+	}
+}
+
 static void fd_close(struct Env *env, int fd) {
 	if (env == NULL || fd < 0 || fd >= FS_MAX_FD || !env->env_fds[fd].used) {
 		return;
 	}
-	if (env->env_fds[fd].type == FD_PIPE_READ || env->env_fds[fd].type == FD_PIPE_WRITE) {
-		pipe_decref(env->env_fds[fd].pipeid, env->env_fds[fd].type);
-	}
+	ofile_decref(env->env_fds[fd].openid);
 	memset(&env->env_fds[fd], 0, sizeof(env->env_fds[fd]));
 }
 
@@ -152,11 +201,34 @@ static void fds_incref_all(struct Env *env) {
 		return;
 	}
 	for (int fd = 0; fd < FS_MAX_FD; fd++) {
-		if (env->env_fds[fd].used &&
-		    (env->env_fds[fd].type == FD_PIPE_READ || env->env_fds[fd].type == FD_PIPE_WRITE)) {
-			pipe_incref(env->env_fds[fd].pipeid, env->env_fds[fd].type);
+		int openid = env->env_fds[fd].openid;
+
+		if (env->env_fds[fd].used && openid >= 0 && openid < FS_MAX_OPEN_FILES &&
+		    open_files[openid].used) {
+			open_files[openid].ref++;
 		}
 	}
+}
+
+static int inherit_user_fd_pages(struct Env *parent, struct Env *child) {
+	if (parent == NULL || child == NULL) {
+		return -E_INVAL;
+	}
+	for (int fd = 0; fd < FS_MAX_FD; fd++) {
+		vaddr_t va = FS_USER_FDTABLE + (vaddr_t)fd * PAGE_SIZE;
+		pte_t *pte = NULL;
+		struct Page *pp = page_lookup(parent->env_pgtable, va, &pte);
+		uint64_t perm;
+
+		if (pp == NULL || pte == NULL || !(*pte & PTE_LIBRARY)) {
+			continue;
+		}
+		perm = PTE_FLAGS(*pte);
+		try(page_insert(child->env_pgtable, pp, va, perm));
+	}
+	memcpy(child->env_fds, parent->env_fds, sizeof(child->env_fds));
+	fds_incref_all(child);
+	return 0;
 }
 
 void syscall_close_env_fds(struct Env *env) {
@@ -166,6 +238,11 @@ void syscall_close_env_fds(struct Env *env) {
 	for (int fd = 0; fd < FS_MAX_FD; fd++) {
 		fd_close(env, fd);
 	}
+}
+
+void syscall_init(void) {
+	memset(open_files, 0, sizeof(open_files));
+	memset(pipes, 0, sizeof(pipes));
 }
 
 static long sys_print_cons(uint64_t str, uint64_t num) {
@@ -428,7 +505,12 @@ static long sys_ipc_info(uint64_t from_va, uint64_t perm_va) {
 }
 
 static long sys_cgetc(void) {
-	return scancharc();
+	int ch;
+
+	do {
+		ch = scancharc();
+	} while (ch == 0);
+	return ch;
 }
 
 static int sysdev_len_ok(uint64_t len) {
@@ -438,16 +520,19 @@ static int sysdev_len_ok(uint64_t len) {
 static int sysdev_range_ok(uint64_t pa, uint64_t len) {
 	uint64_t end = pa + len;
 
-	if (!sysdev_len_ok(len) || end < pa) {
+	if (!sysdev_len_ok(len) || end < pa || (pa & (len - 1)) != 0) {
 		return 0;
 	}
 	if (pa >= CLINT_BASE && end <= CLINT_BASE + SV39_LARGE_PAGE_SIZE) {
 		return 1;
 	}
-	if (pa >= PLIC_BASE && end <= PLIC_BASE + SV39_LARGE_PAGE_SIZE) {
+	if (pa >= PLIC_BASE && end <= PLIC_BASE + 2 * SV39_LARGE_PAGE_SIZE) {
 		return 1;
 	}
 	if (pa >= UART0_BASE && end <= UART0_BASE + SV39_LARGE_PAGE_SIZE) {
+		return 1;
+	}
+	if (pa >= VIRTIO0_BASE && end <= VIRTIO0_BASE + SV39_LARGE_PAGE_SIZE) {
 		return 1;
 	}
 	return 0;
@@ -515,23 +600,30 @@ static long sys_fs_open(uint64_t path_va, uint64_t flags) {
 	}
 	{
 		int fd = fd_alloc(curenv);
+		int openid;
+		struct KernelOpenFile *ofile;
 
 		if (fd < 0) {
 			return fd;
 		}
+		openid = ofile_alloc();
+		if (openid < 0) {
+			return openid;
+		}
+		ofile = &open_files[openid];
+		ofile->type = FD_FILE;
+		ofile->fileid = fileid;
 		curenv->env_fds[fd].used = 1;
-		curenv->env_fds[fd].type = FD_FILE;
-		curenv->env_fds[fd].fileid = fileid;
-		curenv->env_fds[fd].pipeid = -1;
+		curenv->env_fds[fd].openid = openid;
 		if (flags & FS_OPEN_APPEND) {
 			struct FsStat stat;
 
-			curenv->env_fds[fd].offset = 0;
+			ofile->offset = 0;
 			if (fs_stat_path(path, &stat) == 0) {
-				curenv->env_fds[fd].offset = stat.size;
+				ofile->offset = stat.size;
 			}
 		} else {
-			curenv->env_fds[fd].offset = 0;
+			ofile->offset = 0;
 		}
 		return fd;
 	}
@@ -540,19 +632,19 @@ static long sys_fs_open(uint64_t path_va, uint64_t flags) {
 static long sys_fs_write(uint64_t fd, uint64_t buf_va, uint64_t len) {
 	char tmp[128];
 	size_t done = 0;
+	struct KernelOpenFile *ofile = fd_file(curenv, fd);
 
-	if (fd >= FS_MAX_FD || !curenv->env_fds[fd].used) {
+	if (ofile == NULL) {
 		return -E_INVAL;
 	}
-	if (curenv->env_fds[fd].type == FD_PIPE_WRITE) {
+	if (ofile->type == FD_PIPE_WRITE) {
 		struct KernelPipe *pipe;
 
-		if (curenv->env_fds[fd].pipeid < 0 ||
-		    curenv->env_fds[fd].pipeid >= FS_MAX_PIPES ||
-		    !pipes[curenv->env_fds[fd].pipeid].used) {
+		if (ofile->pipeid < 0 || ofile->pipeid >= FS_MAX_PIPES ||
+		    !pipes[ofile->pipeid].used) {
 			return -E_INVAL;
 		}
-		pipe = &pipes[curenv->env_fds[fd].pipeid];
+		pipe = &pipes[ofile->pipeid];
 		if (pipe->readers == 0) {
 			return 0;
 		}
@@ -566,7 +658,7 @@ static long sys_fs_write(uint64_t fd, uint64_t buf_va, uint64_t len) {
 		}
 		return done == 0 ? -E_IPC_NOT_RECV : (long)done;
 	}
-	if (curenv->env_fds[fd].type != FD_FILE) {
+	if (ofile->type != FD_FILE) {
 		return -E_INVAL;
 	}
 	while (done < len) {
@@ -577,8 +669,7 @@ static long sys_fs_write(uint64_t fd, uint64_t buf_va, uint64_t len) {
 			chunk = sizeof(tmp);
 		}
 		try(copy_from_user(buf_va + done, tmp, chunk));
-		n = fs_write_file(curenv->env_fds[fd].fileid,
-		                  curenv->env_fds[fd].offset + done, tmp, chunk);
+		n = fs_write_file(ofile->fileid, ofile->offset + done, tmp, chunk);
 		if (n < 0) {
 			return n;
 		}
@@ -587,26 +678,26 @@ static long sys_fs_write(uint64_t fd, uint64_t buf_va, uint64_t len) {
 			break;
 		}
 	}
-	curenv->env_fds[fd].offset += done;
+	ofile->offset += done;
 	return (long)done;
 }
 
 static long sys_fs_read(uint64_t fd, uint64_t buf_va, uint64_t len) {
 	char tmp[128];
 	size_t done = 0;
+	struct KernelOpenFile *ofile = fd_file(curenv, fd);
 
-	if (fd >= FS_MAX_FD || !curenv->env_fds[fd].used) {
+	if (ofile == NULL) {
 		return -E_INVAL;
 	}
-	if (curenv->env_fds[fd].type == FD_PIPE_READ) {
+	if (ofile->type == FD_PIPE_READ) {
 		struct KernelPipe *pipe;
 
-		if (curenv->env_fds[fd].pipeid < 0 ||
-		    curenv->env_fds[fd].pipeid >= FS_MAX_PIPES ||
-		    !pipes[curenv->env_fds[fd].pipeid].used) {
+		if (ofile->pipeid < 0 || ofile->pipeid >= FS_MAX_PIPES ||
+		    !pipes[ofile->pipeid].used) {
 			return -E_INVAL;
 		}
-		pipe = &pipes[curenv->env_fds[fd].pipeid];
+		pipe = &pipes[ofile->pipeid];
 		while (done < len && pipe->rpos != pipe->wpos) {
 			uint8_t ch = pipe->buf[pipe->rpos % FS_PIPE_CAPACITY];
 
@@ -619,7 +710,7 @@ static long sys_fs_read(uint64_t fd, uint64_t buf_va, uint64_t len) {
 		}
 		return (long)done;
 	}
-	if (curenv->env_fds[fd].type != FD_FILE) {
+	if (ofile->type != FD_FILE) {
 		return -E_INVAL;
 	}
 	while (done < len) {
@@ -629,8 +720,7 @@ static long sys_fs_read(uint64_t fd, uint64_t buf_va, uint64_t len) {
 		if (chunk > sizeof(tmp)) {
 			chunk = sizeof(tmp);
 		}
-		n = fs_read_file(curenv->env_fds[fd].fileid,
-		                 curenv->env_fds[fd].offset + done, tmp, chunk);
+		n = fs_read_file(ofile->fileid, ofile->offset + done, tmp, chunk);
 		if (n < 0) {
 			return n;
 		}
@@ -643,7 +733,7 @@ static long sys_fs_read(uint64_t fd, uint64_t buf_va, uint64_t len) {
 			break;
 		}
 	}
-	curenv->env_fds[fd].offset += done;
+	ofile->offset += done;
 	return (long)done;
 }
 
@@ -666,56 +756,65 @@ static long sys_fs_stat(uint64_t path_va, uint64_t stat_va) {
 
 static long sys_fs_fstat(uint64_t fd, uint64_t stat_va) {
 	struct FsStat stat;
+	struct KernelOpenFile *ofile = fd_file(curenv, fd);
 
-	if (stat_va == 0 || fd >= FS_MAX_FD || !curenv->env_fds[fd].used) {
+	if (stat_va == 0 || ofile == NULL) {
 		return -E_INVAL;
 	}
-	if (curenv->env_fds[fd].type == FD_PIPE_READ || curenv->env_fds[fd].type == FD_PIPE_WRITE) {
+	if (ofile->type == FD_PIPE_READ || ofile->type == FD_PIPE_WRITE) {
 		memset(&stat, 0, sizeof(stat));
 		stat.type = FS_TYPE_FILE;
+		stat.mode = 0600;
+		stat.nlink = 1;
 		return copy_to_user(stat_va, &stat, sizeof(stat));
 	}
-	if (curenv->env_fds[fd].type != FD_FILE) {
+	if (ofile->type != FD_FILE) {
 		return -E_INVAL;
 	}
-	try(fs_stat_file(curenv->env_fds[fd].fileid, &stat));
+	try(fs_stat_file(ofile->fileid, &stat));
 	return copy_to_user(stat_va, &stat, sizeof(stat));
 }
 
 static long sys_fs_seek(uint64_t fd, uint64_t off) {
-	if (fd >= FS_MAX_FD || !curenv->env_fds[fd].used) {
+	struct KernelOpenFile *ofile = fd_file(curenv, fd);
+
+	if (ofile == NULL) {
 		return -E_INVAL;
 	}
-	if (curenv->env_fds[fd].type != FD_FILE) {
+	if (ofile->type != FD_FILE) {
 		return -E_INVAL;
 	}
-	curenv->env_fds[fd].offset = (size_t)off;
+	ofile->offset = (size_t)off;
 	return 0;
 }
 
 static long sys_fs_dup(uint64_t oldfd, uint64_t newfd) {
-	if (oldfd >= FS_MAX_FD || newfd >= FS_MAX_FD || !curenv->env_fds[oldfd].used) {
+	struct KernelOpenFile *ofile = fd_file(curenv, oldfd);
+
+	if (newfd >= FS_MAX_FD || ofile == NULL) {
 		return -E_INVAL;
+	}
+	if (oldfd == newfd) {
+		return (long)newfd;
 	}
 	if (curenv->env_fds[newfd].used) {
 		fd_close(curenv, (int)newfd);
 	}
 	curenv->env_fds[newfd] = curenv->env_fds[oldfd];
-	if (curenv->env_fds[newfd].type == FD_PIPE_READ ||
-	    curenv->env_fds[newfd].type == FD_PIPE_WRITE) {
-		pipe_incref(curenv->env_fds[newfd].pipeid, curenv->env_fds[newfd].type);
-	}
+	ofile->ref++;
 	return (long)newfd;
 }
 
 static long sys_fs_truncate(uint64_t fd, uint64_t size) {
-	if (fd >= FS_MAX_FD || !curenv->env_fds[fd].used) {
+	struct KernelOpenFile *ofile = fd_file(curenv, fd);
+
+	if (ofile == NULL) {
 		return -E_INVAL;
 	}
-	if (curenv->env_fds[fd].type != FD_FILE) {
+	if (ofile->type != FD_FILE) {
 		return -E_INVAL;
 	}
-	return fs_truncate_file(curenv->env_fds[fd].fileid, (size_t)size);
+	return fs_truncate_file(ofile->fileid, (size_t)size);
 }
 
 static int copy_user_u64(uint64_t va, uint64_t *out) {
@@ -770,20 +869,26 @@ static int setup_child_argv_stack(struct Env *child, uint64_t argv_va) {
 	}
 	for (int i = argc - 1; i >= 0; i--) {
 		sp -= arglen[i];
+		if (sp < USER_STACK_BASE) {
+			return -E_NO_MEM;
+		}
 		memcpy(stack + (sp - USER_STACK_BASE), argbuf[i], arglen[i]);
 		child_argv[i] = sp;
 	}
 	sp &= ~0xfUL;
 	child_argv[argc] = 0;
 	sp -= (uint64_t)(argc + 1) * sizeof(uint64_t);
+	if (sp < USER_STACK_BASE) {
+		return -E_NO_MEM;
+	}
 	argv_child_va = sp;
 	memcpy(stack + (sp - USER_STACK_BASE), child_argv,
 	       (size_t)(argc + 1) * sizeof(uint64_t));
 	sp -= sizeof(uint64_t);
-	memset(stack + (sp - USER_STACK_BASE), 0, sizeof(uint64_t));
 	if (sp < USER_STACK_BASE) {
 		return -E_NO_MEM;
 	}
+	memset(stack + (sp - USER_STACK_BASE), 0, sizeof(uint64_t));
 	try(translate(child->env_pgtable, USER_STACK_BASE, &stack_pa, NULL));
 	memcpy((void *)(uintptr_t)stack_pa, stack, sizeof(stack));
 	child->env_tf.regs[2] = sp;
@@ -796,6 +901,8 @@ static long sys_pipe(uint64_t pfd_va) {
 	int pipeid = -1;
 	int rfd;
 	int wfd;
+	int ropenid;
+	int wopenid;
 	int out[2];
 
 	if (pfd_va == 0) {
@@ -814,32 +921,47 @@ static long sys_pipe(uint64_t pfd_va) {
 	if (rfd < 0) {
 		return rfd;
 	}
+	ropenid = ofile_alloc();
+	if (ropenid < 0) {
+		return ropenid;
+	}
 	curenv->env_fds[rfd].used = 1;
+	curenv->env_fds[rfd].openid = ropenid;
 	wfd = fd_alloc(curenv);
 	if (wfd < 0) {
-		curenv->env_fds[rfd].used = 0;
+		fd_close(curenv, rfd);
 		return wfd;
+	}
+	wopenid = ofile_alloc();
+	if (wopenid < 0) {
+		fd_close(curenv, rfd);
+		return wopenid;
 	}
 	memset(&pipes[pipeid], 0, sizeof(pipes[pipeid]));
 	pipes[pipeid].used = 1;
 	pipes[pipeid].readers = 1;
 	pipes[pipeid].writers = 1;
 
-	memset(&curenv->env_fds[rfd], 0, sizeof(curenv->env_fds[rfd]));
-	curenv->env_fds[rfd].used = 1;
-	curenv->env_fds[rfd].type = FD_PIPE_READ;
-	curenv->env_fds[rfd].pipeid = pipeid;
-	curenv->env_fds[rfd].fileid = -1;
-
-	memset(&curenv->env_fds[wfd], 0, sizeof(curenv->env_fds[wfd]));
 	curenv->env_fds[wfd].used = 1;
-	curenv->env_fds[wfd].type = FD_PIPE_WRITE;
-	curenv->env_fds[wfd].pipeid = pipeid;
-	curenv->env_fds[wfd].fileid = -1;
+	curenv->env_fds[wfd].openid = wopenid;
+
+	open_files[ropenid].type = FD_PIPE_READ;
+	open_files[ropenid].pipeid = pipeid;
+	open_files[wopenid].type = FD_PIPE_WRITE;
+	open_files[wopenid].pipeid = pipeid;
 
 	out[0] = rfd;
 	out[1] = wfd;
-	return copy_to_user(pfd_va, out, sizeof(out));
+	{
+		int r = copy_to_user(pfd_va, out, sizeof(out));
+
+		if (r < 0) {
+			fd_close(curenv, rfd);
+			fd_close(curenv, wfd);
+			return r;
+		}
+	}
+	return 0;
 }
 
 static long sys_spawn(uint64_t path_va, uint64_t arg) {
@@ -856,6 +978,13 @@ static long sys_spawn(uint64_t path_va, uint64_t arg) {
 	if (r < 0) {
 		env_free(child);
 		return r;
+	}
+	if (curenv != NULL) {
+		r = inherit_user_fd_pages(curenv, child);
+		if (r < 0) {
+			env_free(child);
+			return r;
+		}
 	}
 	if (arg >= UTEMP && arg < USER_TOP) {
 		r = setup_child_argv_stack(child, arg);
@@ -877,6 +1006,47 @@ static long sys_env_status(uint64_t envid) {
 		return ENV_FREE;
 	}
 	return env->env_status;
+}
+
+static long sys_env_find(uint64_t name_va) {
+	char name[sizeof(envs[0].env_name)];
+
+	try(copy_user_string(name_va, name, sizeof(name)));
+	for (int i = 0; i < NENV; i++) {
+		if (envs[i].env_status != ENV_FREE &&
+		    strcmp(envs[i].env_name, name) == 0) {
+			return (long)envs[i].env_id;
+		}
+	}
+	return -E_BAD_ENV;
+}
+
+static int current_is_fsserv(void) {
+	return curenv != NULL && strcmp(curenv->env_name, "fsserv") == 0;
+}
+
+static long sys_block_read(uint64_t sector, uint64_t buf_va) {
+	uint8_t sector_buf[BLOCK_SECTOR_SIZE];
+	int r;
+
+	if (!current_is_fsserv()) {
+		return -E_INVAL;
+	}
+	r = block_read_sector(sector, sector_buf);
+	if (r < 0) {
+		return r;
+	}
+	return copy_to_user(buf_va, sector_buf, sizeof(sector_buf));
+}
+
+static long sys_block_write(uint64_t sector, uint64_t buf_va) {
+	uint8_t sector_buf[BLOCK_SECTOR_SIZE];
+
+	if (!current_is_fsserv()) {
+		return -E_INVAL;
+	}
+	try(copy_from_user(buf_va, sector_buf, sizeof(sector_buf)));
+	return block_write_sector(sector, sector_buf);
 }
 
 static long sys_fork(void) {
@@ -914,6 +1084,24 @@ static long sys_fs_rename(uint64_t old_va, uint64_t new_va) {
 	try(copy_user_string(old_va, old_path, sizeof(old_path)));
 	try(copy_user_string(new_va, new_path, sizeof(new_path)));
 	return fs_rename_path(old_path, new_path);
+}
+
+static long sys_fs_mkdir(uint64_t path_va) {
+	char path[FS_PATH_MAX];
+
+	try(copy_user_string(path_va, path, sizeof(path)));
+	return fs_mkdir_path(path);
+}
+
+static long sys_fs_chmod(uint64_t path_va, uint64_t mode) {
+	char path[FS_PATH_MAX];
+
+	try(copy_user_string(path_va, path, sizeof(path)));
+	return fs_chmod_path(path, (u32)mode);
+}
+
+static long sys_fs_sync(void) {
+	return fs_sync();
 }
 
 static long sys_fs_list(uint64_t index, uint64_t path_va, uint64_t path_len,
@@ -1000,8 +1188,11 @@ void syscall_dispatch(void) {
 		                       curenv->env_tf.regs[12], curenv->env_tf.regs[13]);
 		break;
 	case SYS_ipc_recv:
-		(void)sys_ipc_recv(curenv->env_tf.regs[10]);
-		return;
+		ret = sys_ipc_recv(curenv->env_tf.regs[10]);
+		if (ret == 0) {
+			return;
+		}
+		break;
 	case SYS_ipc_info:
 		ret = sys_ipc_info(curenv->env_tf.regs[10], curenv->env_tf.regs[11]);
 		break;
@@ -1061,6 +1252,18 @@ void syscall_dispatch(void) {
 	case SYS_env_status:
 		ret = sys_env_status(curenv->env_tf.regs[10]);
 		break;
+	case SYS_env_find:
+		ret = sys_env_find(curenv->env_tf.regs[10]);
+		break;
+	case SYS_block_read:
+		ret = sys_block_read(curenv->env_tf.regs[10], curenv->env_tf.regs[11]);
+		break;
+	case SYS_block_write:
+		ret = sys_block_write(curenv->env_tf.regs[10], curenv->env_tf.regs[11]);
+		break;
+	case SYS_fs_chmod:
+		ret = sys_fs_chmod(curenv->env_tf.regs[10], curenv->env_tf.regs[11]);
+		break;
 	case SYS_fs_fstat:
 		ret = sys_fs_fstat(curenv->env_tf.regs[10], curenv->env_tf.regs[11]);
 		break;
@@ -1072,6 +1275,12 @@ void syscall_dispatch(void) {
 		break;
 	case SYS_pipe:
 		ret = sys_pipe(curenv->env_tf.regs[10]);
+		break;
+	case SYS_fs_mkdir:
+		ret = sys_fs_mkdir(curenv->env_tf.regs[10]);
+		break;
+	case SYS_fs_sync:
+		ret = sys_fs_sync();
 		break;
 	default:
 		ret = -E_NO_SYS;

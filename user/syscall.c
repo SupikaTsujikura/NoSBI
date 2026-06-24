@@ -151,6 +151,10 @@ int syscall_env_status(u_long envid) {
 	return (int)msyscall(SYS_env_status, (long)envid, 0, 0, 0, 0, 0);
 }
 
+int syscall_env_find(const char *name) {
+	return (int)msyscall(SYS_env_find, (long)name, 0, 0, 0, 0, 0);
+}
+
 int syscall_fs_fstat(int fd, struct FsStat *stat) {
 	return (int)msyscall(SYS_fs_fstat, fd, (long)stat, 0, 0, 0, 0);
 }
@@ -173,4 +177,28 @@ int syscall_read_dev(void *dst, u_long pa, u_long len) {
 
 int syscall_pipe(int pfd[2]) {
 	return (int)msyscall(SYS_pipe, (long)pfd, 0, 0, 0, 0, 0);
+}
+
+int syscall_cgetc(void) {
+	return (int)msyscall(SYS_cgetc, 0, 0, 0, 0, 0, 0);
+}
+
+int syscall_block_read(u_long sector, void *buf) {
+	return (int)msyscall(SYS_block_read, (long)sector, (long)buf, 0, 0, 0, 0);
+}
+
+int syscall_block_write(u_long sector, const void *buf) {
+	return (int)msyscall(SYS_block_write, (long)sector, (long)buf, 0, 0, 0, 0);
+}
+
+int syscall_fs_chmod(const char *path, u32 mode) {
+	return (int)msyscall(SYS_fs_chmod, (long)path, (long)mode, 0, 0, 0, 0);
+}
+
+int syscall_fs_mkdir(const char *path) {
+	return (int)msyscall(SYS_fs_mkdir, (long)path, 0, 0, 0, 0, 0);
+}
+
+int syscall_fs_sync(void) {
+	return (int)msyscall(SYS_fs_sync, 0, 0, 0, 0, 0, 0);
 }

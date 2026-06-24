@@ -7,6 +7,7 @@
 #include <plic.h>
 #include <printk.h>
 #include <sched.h>
+#include <syscall.h>
 
 extern char trap_entry[];
 
@@ -43,20 +44,22 @@ void kmain(void) {
 	block_init();
 	fs_init();
 	printk("  fs_init done\n");
+	syscall_init();
 	sched_init();
 	printk("  sched_init done\n");
-	struct Env *user_a = env_create_path("user-a", "/bin/demo", 1);
-	if (user_a == NULL) {
-		panic("failed to create user-a from /bin/demo");
+	struct Env *fsserv_env = env_create_path("fsserv", "/bin/fsserv", 1);
+	if (fsserv_env == NULL) {
+		panic("failed to create fsserv from /bin/fsserv");
 	}
-	user_a->env_tf.regs[10] = 'A';
-	printk("  user-a loaded\n");
-	struct Env *user_b = env_create_path("user-b", "/bin/demo", 1);
-	if (user_b == NULL) {
-		panic("failed to create user-b from /bin/demo");
+	printk("  fsserv loaded\n");
+	struct Env *init_env = env_create_path("init", "/init", 1);
+	if (init_env == NULL) {
+		init_env = env_create_path("init", "/bin/init", 1);
 	}
-	user_b->env_tf.regs[10] = 'B';
-	printk("  user-b loaded\n");
+	if (init_env == NULL) {
+		panic("failed to create init from /init or /bin/init");
+	}
+	printk("  init loaded\n");
 
 	trap_init();
 	printk("  trap handler installed at 0x%016lx\n", csr_read_stvec());

@@ -40,9 +40,16 @@ enum {
 	SYS_fs_truncate = 35,
 	SYS_ipc_info = 36,
 	SYS_pipe = 37,
+	SYS_fs_mkdir = 38,
+	SYS_fs_sync = 39,
+	SYS_env_find = 40,
+	SYS_block_read = 41,
+	SYS_block_write = 42,
+	SYS_fs_chmod = 43,
 	MAX_SYSNO,
 };
 
 void syscall_dispatch(void);
+void syscall_init(void);
 
 #endif
