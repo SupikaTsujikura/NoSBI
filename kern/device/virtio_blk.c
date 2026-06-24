@@ -233,8 +233,7 @@ static int block_rw_sector(u32 type, u64 sector, void *buf) {
 	}
 	sstatus = csr_read_sstatus();
 	sie = csr_read_sie();
-	(void)blk_irq_wait_enabled;
-	use_irq = 0;
+	use_irq = block_interrupts_enabled() && blk_irq_wait_enabled;
 	if (!use_irq) {
 		(void)csr_read_clear_sstatus(SSTATUS_SIE);
 	}
@@ -271,10 +270,11 @@ static int block_rw_sector(u32 type, u64 sector, void *buf) {
 	mmio_write(VIRTIO_MMIO_QUEUE_NOTIFY, 0);
 	if (use_irq) {
 		deadline = csr_read_time() + VIRTIO_IRQ_WAIT_TICKS;
-		csr_write_sie(SIE_SEIE);
+		csr_write_sie(sie | SIE_SEIE);
 		csr_set_sstatus(SSTATUS_SIE);
 		while (!blk_done && used_seen == virtq_used->idx &&
 		       csr_read_time() < deadline) {
+			__asm__ volatile("wfi" ::: "memory");
 			mem_barrier();
 		}
 		csr_write_sie(sie);

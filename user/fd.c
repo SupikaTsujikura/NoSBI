@@ -23,7 +23,7 @@ static int fd_alloc_from(int start, struct Fd **fd) {
 }
 
 int fd_alloc(struct Fd **fd) {
-	return fd_alloc_from(3, fd);
+	return fd_alloc_from(0, fd);
 }
 
 int fd_lookup(int fdnum, struct Fd **fd) {

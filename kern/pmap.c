@@ -334,7 +334,7 @@ static int vm_copy_user_cow_level(pagetable_t src, pagetable_t dst, int level,
 			}
 			pp = pa2page(PTE2PA(pte));
 			perm = PTE_FLAGS(pte);
-			if (perm & (PTE_W | PTE_COW)) {
+			if (!(perm & PTE_LIBRARY) && (perm & (PTE_W | PTE_COW))) {
 				perm = (perm & ~(PTE_W | PTE_D)) | PTE_COW;
 				*spte = PA2PTE(page2pa(pp)) | perm | PTE_V;
 			}

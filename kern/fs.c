@@ -16,6 +16,8 @@ extern char _binary_build_user_argvtest_elf_start[];
 extern char _binary_build_user_argvtest_elf_end[];
 extern char _binary_build_user_writeback_elf_start[];
 extern char _binary_build_user_writeback_elf_end[];
+extern char _binary_build_user_course_tests_elf_start[];
+extern char _binary_build_user_course_tests_elf_end[];
 extern char _binary_build_user_fsserv_elf_start[];
 extern char _binary_build_user_fsserv_elf_end[];
 
@@ -61,6 +63,8 @@ static struct MemFile memfiles[] = {
 	{.path = "bin/argvtest", .type = FS_TYPE_FILE, .used = 1},
 	{.path = "/bin/writeback", .type = FS_TYPE_FILE, .used = 1},
 	{.path = "bin/writeback", .type = FS_TYPE_FILE, .used = 1},
+	{.path = "/bin/course_tests", .type = FS_TYPE_FILE, .used = 1},
+	{.path = "bin/course_tests", .type = FS_TYPE_FILE, .used = 1},
 	{.path = "/bin/fsserv", .type = FS_TYPE_FILE, .used = 1},
 	{.path = "bin/fsserv", .type = FS_TYPE_FILE, .used = 1},
 };
@@ -82,6 +86,9 @@ void fs_init(void) {
 	const void *writeback = _binary_build_user_writeback_elf_start;
 	size_t writeback_size = (size_t)(_binary_build_user_writeback_elf_end -
 	                                 _binary_build_user_writeback_elf_start);
+	const void *course_tests = _binary_build_user_course_tests_elf_start;
+	size_t course_tests_size = (size_t)(_binary_build_user_course_tests_elf_end -
+	                                    _binary_build_user_course_tests_elf_start);
 	const void *fsserv = _binary_build_user_fsserv_elf_start;
 	size_t fsserv_size = (size_t)(_binary_build_user_fsserv_elf_end -
 	                              _binary_build_user_fsserv_elf_start);
@@ -118,6 +125,11 @@ void fs_init(void) {
 			memfiles[i].data = (void *)writeback;
 			memfiles[i].size = writeback_size;
 			memfiles[i].capacity = writeback_size;
+		} else if (strcmp(memfiles[i].path, "/bin/course_tests") == 0 ||
+		           strcmp(memfiles[i].path, "bin/course_tests") == 0) {
+			memfiles[i].data = (void *)course_tests;
+			memfiles[i].size = course_tests_size;
+			memfiles[i].capacity = course_tests_size;
 		} else if (strcmp(memfiles[i].path, "/bin/fsserv") == 0 ||
 		           strcmp(memfiles[i].path, "bin/fsserv") == 0) {
 			memfiles[i].data = (void *)fsserv;

@@ -35,10 +35,23 @@ static int user_va_ok(vaddr_t va) {
 	return va >= UTEMP && va < USER_MAP_TOP && (va & (PAGE_SIZE - 1)) == 0;
 }
 
+static int user_perm_ok(uint64_t perm) {
+	const uint64_t allowed = PTE_FLAGS_MASK & ~PTE_G;
+
+	if (perm == 0 || (perm & ~allowed) != 0) {
+		return 0;
+	}
+	return 1;
+}
+
+static int user_perm_writable(uint64_t perm) {
+	return (perm & (PTE_D | PTE_W)) != 0 && !(perm & PTE_COW);
+}
+
 static uint64_t user_perm_to_pte(uint64_t perm) {
 	uint64_t pte_perm = PTE_U | PTE_R | PTE_A;
 
-	if ((perm & PTE_D) && !(perm & PTE_COW)) {
+	if (user_perm_writable(perm)) {
 		pte_perm |= PTE_W | PTE_D;
 	}
 	if (perm & PTE_X) {
@@ -281,7 +294,7 @@ static long sys_mem_alloc(uint64_t envid, uint64_t va, uint64_t perm) {
 	struct Page *pp;
 	int r;
 
-	if (!user_va_ok(va)) {
+	if (!user_va_ok(va) || !user_perm_ok(perm)) {
 		return -E_INVAL;
 	}
 	try(envid2env(envid, &env, 1));
@@ -303,7 +316,7 @@ static long sys_mem_map(uint64_t srcid, uint64_t srcva, uint64_t dstid,
 	uint64_t srcperm;
 	uint64_t dstperm;
 
-	if (!user_va_ok(srcva) || !user_va_ok(dstva)) {
+	if (!user_va_ok(srcva) || !user_va_ok(dstva) || !user_perm_ok(perm)) {
 		return -E_INVAL;
 	}
 	try(envid2env(srcid, &srcenv, 1));
@@ -327,6 +340,9 @@ static long sys_mem_unmap(uint64_t envid, uint64_t va) {
 		return -E_INVAL;
 	}
 	try(envid2env(envid, &env, 1));
+	if (page_lookup(env->env_pgtable, va, NULL) == NULL) {
+		return -E_INVAL;
+	}
 	page_remove(env->env_pgtable, va);
 	return 0;
 }
@@ -337,7 +353,7 @@ static long sys_mem_protect(uint64_t envid, uint64_t va, uint64_t perm) {
 	uint64_t oldperm;
 	uint64_t newperm;
 
-	if (!user_va_ok(va)) {
+	if (!user_va_ok(va) || !user_perm_ok(perm)) {
 		return -E_INVAL;
 	}
 	try(envid2env(envid, &env, 1));
@@ -467,14 +483,24 @@ static long sys_ipc_try_send(uint64_t envid, uint64_t value,
 	if (srcva != 0 && !user_va_ok(srcva)) {
 		return -E_INVAL;
 	}
+	if (srcva != 0 && !user_perm_ok(perm)) {
+		return -E_INVAL;
+	}
 	try(envid2env(envid, &dstenv, 0));
 	if (!dstenv->env_ipc_recving) {
 		return -E_IPC_NOT_RECV;
 	}
 	if (srcva != 0 && dstenv->env_ipc_dstva != 0) {
-		struct Page *pp = page_lookup(curenv->env_pgtable, srcva, NULL);
+		pte_t *srcpte;
+		struct Page *pp = page_lookup(curenv->env_pgtable, srcva, &srcpte);
+		uint64_t srcperm;
 
-		if (pp == NULL) {
+		if (pp == NULL || srcpte == NULL) {
+			return -E_INVAL;
+		}
+		srcperm = pte_to_user_perm(*srcpte);
+		if (user_perm_writable(perm) &&
+		    !(srcperm & (PTE_D | PTE_COW | PTE_LIBRARY))) {
 			return -E_INVAL;
 		}
 		try(page_insert(dstenv->env_pgtable, pp, dstenv->env_ipc_dstva,
@@ -523,16 +549,16 @@ static int sysdev_range_ok(uint64_t pa, uint64_t len) {
 	if (!sysdev_len_ok(len) || end < pa || (pa & (len - 1)) != 0) {
 		return 0;
 	}
-	if (pa >= CLINT_BASE && end <= CLINT_BASE + SV39_LARGE_PAGE_SIZE) {
+	if (pa >= CLINT_BASE && end <= CLINT_BASE + 0x10000UL) {
 		return 1;
 	}
 	if (pa >= PLIC_BASE && end <= PLIC_BASE + 2 * SV39_LARGE_PAGE_SIZE) {
 		return 1;
 	}
-	if (pa >= UART0_BASE && end <= UART0_BASE + SV39_LARGE_PAGE_SIZE) {
+	if (pa >= UART0_BASE && end <= UART0_BASE + 0x100UL) {
 		return 1;
 	}
-	if (pa >= VIRTIO0_BASE && end <= VIRTIO0_BASE + SV39_LARGE_PAGE_SIZE) {
+	if (pa >= VIRTIO0_BASE && end <= VIRTIO0_BASE + 8 * 0x1000UL) {
 		return 1;
 	}
 	return 0;
@@ -1133,8 +1159,12 @@ void syscall_dispatch(void) {
 
 	switch (sysno) {
 	case SYS_putchar:
-		printcharc((char)curenv->env_tf.regs[10]);
-		ret = 0;
+		if (curenv->env_tf.regs[10] > 0x7f) {
+			ret = -E_INVAL;
+		} else {
+			printcharc((char)curenv->env_tf.regs[10]);
+			ret = 0;
+		}
 		break;
 	case SYS_print_cons:
 		ret = sys_print_cons(curenv->env_tf.regs[10], curenv->env_tf.regs[11]);

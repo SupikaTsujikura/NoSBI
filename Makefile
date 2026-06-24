@@ -12,10 +12,10 @@ TARGET_DIR ?= target
 BUILD_DIR ?= build
 KERNEL_ELF := $(TARGET_DIR)/mos-riscv.elf
 KERNEL_BIN := $(TARGET_DIR)/mos-riscv.bin
-USER_PROGS := fsserv init demo reader argvtest writeback
+USER_PROGS := fsserv init demo reader argvtest writeback course_tests
 USER_ELFS := $(patsubst %,$(BUILD_DIR)/user/%.elf,$(USER_PROGS))
 USER_EMBED_OBJS := $(patsubst %,$(BUILD_DIR)/user/%_elf.o,$(USER_PROGS))
-USER_SRCS := user/fsserv.c user/init.c user/demo.c user/reader.c user/argvtest.c user/writeback.c user/syscall.c user/fork.c user/fd.c user/fsipc.c user/compat.c user/printf.c
+USER_SRCS := user/fsserv.c user/init.c user/demo.c user/reader.c user/argvtest.c user/writeback.c user/course_tests.c user/syscall.c user/fork.c user/fd.c user/fsipc.c user/compat.c user/printf.c
 USER_ASMS := user/crt.S
 USER_OBJS := $(patsubst user/%.c,$(BUILD_DIR)/user/%.o,$(USER_SRCS)) \
 	$(patsubst user/%.S,$(BUILD_DIR)/user/%.o,$(USER_ASMS))
